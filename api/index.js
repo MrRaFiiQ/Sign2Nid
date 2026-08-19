@@ -25,28 +25,33 @@ function cleanText(text) {
     .trim();
 }
 
-// Ultra Robust Key-Value Extractor (Regex + Line-by-Line Search)
-function getValue(text, key) {
+// Ultra Robust Line-by-Line Key-Value Extractor
+function getFieldValue(text, key) {
   if (!text) return '';
+  const lines = text.split(/\r?\n/).map(l => l.trim());
   
-  // Method 1: Flexible Regex match
-  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const regex = new RegExp(`${escapedKey}\\s*(?:\\r?\\n)?\\s*\\|\\s*([^\\r\\n|]+)`, 'i');
-  const match = text.match(regex);
-  if (match && match[1] && match[1].trim()) {
-    return cleanText(match[1]);
-  }
-
-  // Method 2: Line-by-Line Fallback Search
-  const lines = text.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
-    if (lines[i].toLowerCase().includes(key.toLowerCase())) {
-      if (lines[i].includes('|')) {
-        const val = lines[i].split('|')[1];
-        if (val && val.trim()) return cleanText(val);
-      } else if (i + 1 < lines.length && lines[i + 1].includes('|')) {
-        const val = lines[i + 1].split('|')[1];
-        if (val && val.trim()) return cleanText(val);
+    const line = lines[i];
+    if (line.toLowerCase().includes(key.toLowerCase())) {
+      // Check same line after '|'
+      if (line.includes('|')) {
+        const parts = line.split('|').map(p => p.trim()).filter(Boolean);
+        if (parts.length > 1) {
+          const val = parts[parts.length - 1];
+          if (val.toLowerCase() !== key.toLowerCase()) {
+            return cleanText(val);
+          }
+        }
+      }
+      // Check subsequent lines
+      for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
+        const nextLine = lines[j];
+        if (nextLine) {
+          const cleaned = nextLine.replace(/^[|]+/, '').trim();
+          if (cleaned && cleaned.toLowerCase() !== key.toLowerCase() && !cleaned.toLowerCase().includes('tag')) {
+            return cleanText(cleaned);
+          }
+        }
       }
     }
   }
@@ -80,12 +85,12 @@ function formatTodayBangla() {
 }
 
 function combineAddress(text) {
-  let home = getValue(text, 'Home/Holding No') || getValue(text, 'Home/Holding');
-  let village = getValue(text, 'Additional Village/Road') || getValue(text, 'Village/Road') || getValue(text, 'Additional Mouza/Moholla');
-  let postOffice = getValue(text, 'Post Office');
-  let postalCode = getValue(text, 'Postal Code') || '1324';
-  let upozila = getValue(text, 'Upozila');
-  let district = getValue(text, 'District');
+  let home = getFieldValue(text, 'Home/Holding No') || getFieldValue(text, 'Home/Holding');
+  let village = getFieldValue(text, 'Additional Village/Road') || getFieldValue(text, 'Village/Road') || getFieldValue(text, 'Additional Mouza/Moholla') || getFieldValue(text, 'Mouza/Moholla');
+  let postOffice = getFieldValue(text, 'Post Office');
+  let postalCode = getFieldValue(text, 'Postal Code') || '1324';
+  let upozila = getFieldValue(text, 'Upozila');
+  let district = getFieldValue(text, 'District');
 
   let parts = [];
   if (home) parts.push('বাসা/হোল্ডিং: ' + home);
@@ -97,7 +102,7 @@ function combineAddress(text) {
   return parts.join(', ');
 }
 
-// Fast Embedded Image Extractor (Lower threshold for small signatures)
+// Extract Embedded Images
 function extractJpegsFromBuffer(buffer) {
   const jpegs = [];
   const soi = Buffer.from([0xFF, 0xD8, 0xFF]);
@@ -111,7 +116,7 @@ function extractJpegsFromBuffer(buffer) {
     if (end === -1) break;
 
     const jpegBuffer = buffer.subarray(start, end + 2);
-    if (jpegBuffer.length > 300) { // Reduced threshold to catch small signature bytes
+    if (jpegBuffer.length > 300) {
       jpegs.push(jpegBuffer);
     }
     offset = end + 2;
@@ -260,11 +265,11 @@ app.post('/', upload.single('pdf'), async (req, res) => {
     const parsedPdf = await pdfParse(pdfBuffer);
     const text = parsedPdf.text;
 
-    const nameBangla = getValue(text, 'Name(Bangla)');
-    const nameEnglish = getValue(text, 'Name(English)').toUpperCase();
-    const nid = getValue(text, 'National ID');
-    const pin = getValue(text, 'Pin');
-    const dobRaw = getValue(text, 'Date of Birth');
+    const nameBangla = getFieldValue(text, 'Name(Bangla)');
+    const nameEnglish = getFieldValue(text, 'Name(English)').toUpperCase();
+    const nid = getFieldValue(text, 'National ID');
+    const pin = getFieldValue(text, 'Pin');
+    const dobRaw = getFieldValue(text, 'Date of Birth');
     const dob = formatDateOfBirth(dobRaw);
 
     // 2. Extract Embedded Images
@@ -279,41 +284,39 @@ app.post('/', upload.single('pdf'), async (req, res) => {
       signImgBase64 = `data:image/jpeg;base64,${extractedJpegs[1].toString('base64')}`;
     }
 
-    // 3. Fallback Canvas Rendering
-    if (!userImgBase64 || !signImgBase64) {
-      try {
-        const page1Buffer = await renderPdfPageToBuffer(pdfBuffer);
-        const metadata = await sharp(page1Buffer).metadata();
-        const w = metadata.width;
-        const h = metadata.height;
+    // 3. Fallback Canvas Rendering for User Photo & Signature
+    try {
+      const page1Buffer = await renderPdfPageToBuffer(pdfBuffer);
+      const metadata = await sharp(page1Buffer).metadata();
+      const w = metadata.width;
+      const h = metadata.height;
 
-        if (!userImgBase64) {
-          const userCropRect = {
-            left: Math.floor(w * 0.60),
-            top: Math.floor(h * 0.005),
-            width: Math.floor(w * 0.36),
-            height: Math.floor(h * 0.22)
-          };
-          const croppedUser = await sharp(page1Buffer).extract(userCropRect).png().toBuffer();
-          userImgBase64 = `data:image/png;base64,${croppedUser.toString('base64')}`;
-        }
-
-        if (!signImgBase64) {
-          const signCropRect = {
-            left: Math.floor(w * 0.05),
-            top: Math.floor(h * 0.23),
-            width: Math.floor(w * 0.50),
-            height: Math.floor(h * 0.08)
-          };
-          const croppedSign = await sharp(page1Buffer)
-            .extract(signCropRect)
-            .png()
-            .toBuffer();
-          signImgBase64 = `data:image/png;base64,${croppedSign.toString('base64')}`;
-        }
-      } catch (imgError) {
-        console.error('Canvas Crop Error:', imgError);
+      if (!userImgBase64) {
+        const userCropRect = {
+          left: Math.floor(w * 0.60),
+          top: Math.floor(h * 0.005),
+          width: Math.floor(w * 0.36),
+          height: Math.floor(h * 0.22)
+        };
+        const croppedUser = await sharp(page1Buffer).extract(userCropRect).png().toBuffer();
+        userImgBase64 = `data:image/png;base64,${croppedUser.toString('base64')}`;
       }
+
+      if (!signImgBase64) {
+        const signCropRect = {
+          left: Math.floor(w * 0.60),
+          top: Math.floor(h * 0.23),
+          width: Math.floor(w * 0.36),
+          height: Math.floor(h * 0.12)
+        };
+        const croppedSign = await sharp(page1Buffer)
+          .extract(signCropRect)
+          .png()
+          .toBuffer();
+        signImgBase64 = `data:image/png;base64,${croppedSign.toString('base64')}`;
+      }
+    } catch (imgError) {
+      console.error('Canvas Crop Error:', imgError);
     }
 
     // Response Structure
@@ -324,12 +327,12 @@ app.post('/', upload.single('pdf'), async (req, res) => {
       pin: pin,
       dateOfBirth: dob,
       dateOfToday: formatTodayBangla(),
-      fatherName: getValue(text, 'Father Name'),
-      motherName: getValue(text, 'Mother Name'),
-      gender: getValue(text, 'Gender'),
-      religion: getValue(text, 'Religion'),
-      birthPlace: getValue(text, 'Birth Place'),
-      bloodGroup: getValue(text, 'Blood Group'),
+      fatherName: getFieldValue(text, 'Father Name'),
+      motherName: getFieldValue(text, 'Mother Name'),
+      gender: getFieldValue(text, 'Gender'),
+      religion: getFieldValue(text, 'Religion'),
+      birthPlace: getFieldValue(text, 'Birth Place'),
+      bloodGroup: getFieldValue(text, 'Blood Group'),
       userIMG: userImgBase64,
       signIMG: signImgBase64,
       address: combineAddress(text)
