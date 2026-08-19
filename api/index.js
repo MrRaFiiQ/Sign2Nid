@@ -1,6 +1,11 @@
 const express = require('express');
 const multer = require('multer');
 const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
+
+// Vercel Serverless-এ pdf.worker.js বান্ডেল নিশ্চিত করার জন্য
+require('pdfjs-dist/legacy/build/pdf.worker.js');
+pdfjsLib.GlobalWorkerOptions.workerSrc = require.resolve('pdfjs-dist/legacy/build/pdf.worker.js');
+
 const { createCanvas } = require('@napi-rs/canvas');
 const sharp = require('sharp');
 const cors = require('cors');
@@ -96,12 +101,6 @@ function normalizeBanglaName(value) {
 
   let result = cleanBangla(value);
 
-  /*
-   * PDF positional extraction-এর পরেও যদি
-   * Bengali glyph fragment থেকে যায়,
-   * common patterns repair করা হবে।
-   */
-
   result = result
     .replace(/মো\s+হা\s+ম্মদ/gu, 'মোহাম্মদ')
     .replace(/মোঃ\s+বা\s+দল/gu, 'মোঃ বাদল')
@@ -184,33 +183,15 @@ function extractPostalCode(text) {
 
 // ============================================================
 // PDF TEXT EXTRACTION
-//
-// IMPORTANT:
-// pdf-parse ব্যবহার করা হয়নি।
-//
-// PDF.js positional text item ব্যবহার করে
-// Bengali text rebuild করা হচ্ছে।
 // ============================================================
 
 async function extractPdfText(pdfBuffer) {
 
   const loadingTask =
     pdfjsLib.getDocument({
-
       data: new Uint8Array(pdfBuffer),
-
       verbosity: 0,
-
-      stopAtErrors: false,
-
-      /*
-       * VERY IMPORTANT
-       *
-       * Vercel Serverless-এ worker/fake-worker
-       * problem এড়ানোর জন্য worker disable।
-       */
-      disableWorker: true
-
+      stopAtErrors: false
     });
 
 
@@ -345,7 +326,6 @@ async function extractPdfText(pdfBuffer) {
     }
 
 
-    // PDF coordinate bottom -> top
     lines.sort(
       (a, b) => b.y - a.y
     );
@@ -397,13 +377,6 @@ async function extractPdfText(pdfBuffer) {
             item.x -
             previousEnd;
 
-
-          /*
-           * Bengali glyph fragment-এর মধ্যে
-           * ছোট gap হলে space দেব না।
-           *
-           * বড় gap হলে নতুন word।
-           */
 
           const gapThreshold =
             Math.max(
@@ -556,9 +529,6 @@ function formatTodayBangla() {
 
 // ============================================================
 // PDF PAGE RENDER
-//
-// Worker disabled above.
-// তাই fake worker আর দরকার নেই।
 // ============================================================
 
 async function renderPdfPageToBuffer(
@@ -567,16 +537,9 @@ async function renderPdfPageToBuffer(
 
   const loadingTask =
     pdfjsLib.getDocument({
-
-      data:
-        new Uint8Array(pdfBuffer),
-
+      data: new Uint8Array(pdfBuffer),
       verbosity: 0,
-
-      stopAtErrors: false,
-
-      disableWorker: true
-
+      stopAtErrors: false
     });
 
 
@@ -736,20 +699,11 @@ async function extractImages(
   }
 
 
-  // ==========================================================
   // USER PHOTO
-  // ==========================================================
-
   const userCropRect =
     safeCrop(
 
       {
-
-        /*
-         * PDF-এর Page 1:
-         * User photo top-right.
-         */
-
         left:
           width * 0.755,
 
@@ -790,20 +744,11 @@ async function extractImages(
     );
 
 
-  // ==========================================================
   // SIGNATURE
-  // ==========================================================
-
   const signCropRect =
     safeCrop(
 
       {
-
-        /*
-         * PDF-এর Page 1-এ
-         * Signature photo-এর ঠিক নিচে।
-         */
-
         left:
           width * 0.765,
 
@@ -1489,10 +1434,6 @@ app.post(
 
     try {
 
-      // ------------------------------------------------------
-      // FILE CHECK
-      // ------------------------------------------------------
-
       if (!req.file) {
 
         return res.status(400).json({
@@ -1532,20 +1473,14 @@ app.post(
         req.file.buffer;
 
 
-      // ------------------------------------------------------
       // TEXT
-      // ------------------------------------------------------
-
       const text =
         await extractPdfText(
           pdfBuffer
         );
 
 
-      // ------------------------------------------------------
       // FIELDS
-      // ------------------------------------------------------
-
       const nameBangla =
         normalizeBanglaName(
           extractBetween(
@@ -1644,10 +1579,7 @@ app.post(
         );
 
 
-      // ------------------------------------------------------
       // IMAGES
-      // ------------------------------------------------------
-
       let images = {
         userIMG: '',
         signIMG: ''
@@ -1671,10 +1603,7 @@ app.post(
       }
 
 
-      // ------------------------------------------------------
       // RESPONSE
-      // ------------------------------------------------------
-
       return res.status(200).json({
 
         code: 200,
