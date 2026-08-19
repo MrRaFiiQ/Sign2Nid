@@ -5,14 +5,15 @@ const { createCanvas } = require('@napi-rs/canvas');
 const sharp = require('sharp');
 const cors = require('cors');
 
-if (pdfjsLib.GlobalWorkerOptions) {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = '';
-}
-
 const app = express();
 
 app.use(cors());
 app.use(express.json());
+
+
+// ============================================================
+// MULTER
+// ============================================================
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -23,13 +24,8 @@ const upload = multer({
 
 
 // ============================================================
-// BASIC HELPERS
+// HELPERS
 // ============================================================
-
-function escapeRegExp(string) {
-  return String(string).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 
 function cleanText(text) {
   if (!text) return '';
@@ -56,238 +52,42 @@ function cleanBangla(text) {
 
 
 function extractBetween(text, start, end) {
-  const regex = new RegExp(
-    `${escapeRegExp(start)}([\\s\\S]*?)${escapeRegExp(end)}`,
-    'i'
-  );
 
-  const match = text.match(regex);
+  const startIndex =
+    text.toLowerCase().indexOf(
+      start.toLowerCase()
+    );
 
-  return match ? cleanText(match[1]) : '';
-}
-
-
-function convertToBangla(numberStr) {
-  const banglaDigits = [
-    '০', '১', '২', '৩', '৪',
-    '৫', '৬', '৭', '৮', '৯'
-  ];
-
-  return String(numberStr).replace(/[0-9]/g, d => {
-    return banglaDigits[Number(d)];
-  });
-}
-
-
-// ============================================================
-// PDF TEXT EXTRACTION
-//
-// IMPORTANT:
-// Do NOT use pdf-parse here.
-//
-// We rebuild the text using:
-// X position + Y position + item width.
-//
-// This prevents Bengali glyphs from becoming:
-// "মো হা ম্মদ ইউসুফসু"
-// ============================================================
-
-async function extractPdfText(pdfBuffer) {
-
-  const loadingTask = pdfjsLib.getDocument({
-    data: new Uint8Array(pdfBuffer),
-    verbosity: 0,
-    stopAtErrors: false
-  });
-
-  const pdfDocument = await loadingTask.promise;
-
-  let allPages = [];
-
-  for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber++) {
-
-    const page = await pdfDocument.getPage(pageNumber);
-
-    const textContent = await page.getTextContent({
-      normalizeWhitespace: false
-    });
-
-    const items = textContent.items
-      .filter(item => {
-        return item &&
-          typeof item.str === 'string' &&
-          item.str.trim() !== '';
-      })
-      .map(item => {
-
-        const transform = item.transform || [];
-
-        return {
-          text: item.str,
-          x: Number(transform[4] || 0),
-          y: Number(transform[5] || 0),
-          width: Number(item.width || 0),
-          height: Number(item.height || 0)
-        };
-      });
-
-    // --------------------------------------------------------
-    // GROUP ITEMS INTO LINES
-    // --------------------------------------------------------
-
-    const lines = [];
-
-    for (const item of items) {
-
-      let matchedLine = null;
-
-      for (const line of lines) {
-
-        const tolerance = Math.max(
-          2.5,
-          Math.min(item.height || 10, line.height || 10) * 0.35
-        );
-
-        if (Math.abs(line.y - item.y) <= tolerance) {
-          matchedLine = line;
-          break;
-        }
-      }
-
-      if (!matchedLine) {
-
-        matchedLine = {
-          y: item.y,
-          height: item.height || 10,
-          items: []
-        };
-
-        lines.push(matchedLine);
-      }
-
-      matchedLine.items.push(item);
-    }
-
-
-    // PDF coordinates are normally bottom-up.
-    // Therefore sort Y descending for top-to-bottom reading.
-    lines.sort((a, b) => b.y - a.y);
-
-
-    // --------------------------------------------------------
-    // REBUILD EACH LINE
-    // --------------------------------------------------------
-
-    const pageLines = [];
-
-    for (const line of lines) {
-
-      line.items.sort((a, b) => a.x - b.x);
-
-      let result = '';
-      let previous = null;
-
-      for (const item of line.items) {
-
-        let currentText = item.text;
-
-        if (!currentText) continue;
-
-        currentText = currentText
-          .replace(/\r/g, '')
-          .replace(/\n/g, '');
-
-        if (!result) {
-
-          result = currentText;
-
-        } else {
-
-          const previousEnd =
-            previous.x + previous.width;
-
-          const gap =
-            item.x - previousEnd;
-
-          /*
-           * Small gap:
-           * same word / Bengali glyph fragments
-           *
-           * Large gap:
-           * new word / table column
-           */
-
-          const gapThreshold = Math.max(
-            2.8,
-            (item.height || 10) * 0.18
-          );
-
-          if (gap > gapThreshold) {
-            result += ' ';
-          }
-
-          result += currentText;
-        }
-
-        previous = item;
-      }
-
-      result = result
-        .replace(/\s+/g, ' ')
-        .trim();
-
-      if (result) {
-        pageLines.push(result);
-      }
-    }
-
-    allPages.push(pageLines.join('\n'));
-
-    page.cleanup();
+  if (startIndex === -1) {
+    return '';
   }
 
-  return allPages.join('\n\n');
+  const valueStart =
+    startIndex + start.length;
+
+  const endIndex =
+    text.toLowerCase().indexOf(
+      end.toLowerCase(),
+      valueStart
+    );
+
+  if (endIndex === -1) {
+    return cleanText(
+      text.substring(valueStart)
+    );
+  }
+
+  return cleanText(
+    text.substring(
+      valueStart,
+      endIndex
+    )
+  );
 }
 
 
 // ============================================================
-// FIELD EXTRACTION
-// ============================================================
-
-function extractNid(text) {
-
-  const match = text.match(
-    /National ID\s*([0-9]{10,17})/i
-  );
-
-  return match ? match[1] : '';
-}
-
-
-function extractPin(text) {
-
-  const match = text.match(
-    /Pin\s*([0-9]{10,17})/i
-  );
-
-  return match ? match[1] : '';
-}
-
-
-function extractPostalCode(text) {
-
-  const match = text.match(
-    /Postal Code\s*([0-9০-৯]{4})/u
-  );
-
-  if (!match) return '';
-
-  return match[1];
-}
-
-
-// ============================================================
-// BANGLA FIELD CLEANUP
+// BANGLA NAME NORMALIZER
 // ============================================================
 
 function normalizeBanglaName(value) {
@@ -296,156 +96,366 @@ function normalizeBanglaName(value) {
 
   let result = cleanBangla(value);
 
-  // Fix common duplicated colon produced by PDF text extraction.
-  result = result.replace(/মোঃঃ/g, 'মোঃ');
-
-  // Remove accidental leading/trailing separators.
-  result = result
-    .replace(/^[,:;\-]+/, '')
-    .replace(/[,:;\-]+$/, '')
-    .trim();
-
-  return result;
-}
-
-
-function normalizePersonName(value) {
-
-  let result = normalizeBanglaName(value);
-
   /*
-   * Some PDF text extractors may produce:
-   *
-   * মো হা ম্মদ ইউসুফসু
-   *
-   * The positional extractor above normally fixes this.
-   *
-   * These fallback repairs are only applied when the
-   * old fragmented pattern is still detected.
+   * PDF positional extraction-এর পরেও যদি
+   * Bengali glyph fragment থেকে যায়,
+   * common patterns repair করা হবে।
    */
 
   result = result
-    .replace(
-      /মো\s+হা\s+ম্মদ/gu,
-      'মোহাম্মদ'
-    )
-    .replace(
-      /ইউসুফসু$/gu,
-      'ইউসুফ'
-    );
+    .replace(/মো\s+হা\s+ম্মদ/gu, 'মোহাম্মদ')
+    .replace(/মোঃ\s+বা\s+দল/gu, 'মোঃ বাদল')
+    .replace(/রে\s+হে\s+না/gu, 'রেহেনা')
+    .replace(/ইউসুফসু/gu, 'ইউসুফ')
+    .replace(/মোহাম্মদ\s+ইউসুফসু/gu, 'মোহাম্মদ ইউসুফ');
 
-  return result;
+  return result.trim();
 }
 
 
 // ============================================================
-// ADDRESS
+// DIGIT CONVERTER
 // ============================================================
 
-function getAddressPart(text, start, end) {
+function convertToBangla(value) {
 
-  let value = extractBetween(text, start, end);
+  const digits = [
+    '০', '১', '২', '৩', '৪',
+    '৫', '৬', '৭', '৮', '৯'
+  ];
 
-  value = cleanBangla(value);
-
-  return value;
+  return String(value).replace(
+    /[0-9]/g,
+    d => digits[Number(d)]
+  );
 }
 
 
-function combineAddress(text) {
+// ============================================================
+// NID
+// ============================================================
 
-  let home =
-    getAddressPart(
-      text,
-      'Home/Holding',
-      'Post Office'
+function extractNid(text) {
+
+  const match =
+    text.match(
+      /National ID\s*([0-9]{10,17})/i
     );
 
-  let village =
-    getAddressPart(
-      text,
-      'Village/Road',
-      'Home/Holding'
+  return match
+    ? match[1]
+    : '';
+}
+
+
+// ============================================================
+// PIN
+// ============================================================
+
+function extractPin(text) {
+
+  const match =
+    text.match(
+      /Pin\s*([0-9]{10,17})/i
     );
 
-  /*
-   * This PDF contains Additional Village/Road.
-   * If normal Village/Road is empty, use Additional.
-   */
+  return match
+    ? match[1]
+    : '';
+}
 
-  if (!village) {
 
-    village =
-      getAddressPart(
-        text,
-        'Additional Village/Road',
-        'Home/Holding'
+// ============================================================
+// POSTAL CODE
+// ============================================================
+
+function extractPostalCode(text) {
+
+  const match =
+    text.match(
+      /Postal Code\s*([0-9০-৯]{4})/u
+    );
+
+  return match
+    ? match[1]
+    : '';
+}
+
+
+// ============================================================
+// PDF TEXT EXTRACTION
+//
+// IMPORTANT:
+// pdf-parse ব্যবহার করা হয়নি।
+//
+// PDF.js positional text item ব্যবহার করে
+// Bengali text rebuild করা হচ্ছে।
+// ============================================================
+
+async function extractPdfText(pdfBuffer) {
+
+  const loadingTask =
+    pdfjsLib.getDocument({
+
+      data: new Uint8Array(pdfBuffer),
+
+      verbosity: 0,
+
+      stopAtErrors: false,
+
+      /*
+       * VERY IMPORTANT
+       *
+       * Vercel Serverless-এ worker/fake-worker
+       * problem এড়ানোর জন্য worker disable।
+       */
+      disableWorker: true
+
+    });
+
+
+  const pdfDocument =
+    await loadingTask.promise;
+
+
+  const pages = [];
+
+
+  for (
+    let pageNumber = 1;
+    pageNumber <= pdfDocument.numPages;
+    pageNumber++
+  ) {
+
+    const page =
+      await pdfDocument.getPage(
+        pageNumber
       );
-  }
 
 
-  let postOffice =
-    getAddressPart(
-      text,
-      'Post Office',
-      'Postal Code'
-    );
+    const textContent =
+      await page.getTextContent({
+        normalizeWhitespace: false
+      });
 
 
-  let postalCode =
-    extractPostalCode(text);
+    const items =
+      textContent.items
+        .filter(item => {
 
-  let postalCodeBangla =
-    convertToBangla(postalCode);
+          return (
+            item &&
+            typeof item.str === 'string' &&
+            item.str.trim() !== ''
+          );
+
+        })
+        .map(item => {
+
+          const transform =
+            item.transform || [];
+
+          return {
+
+            text: item.str,
+
+            x:
+              Number(
+                transform[4] || 0
+              ),
+
+            y:
+              Number(
+                transform[5] || 0
+              ),
+
+            width:
+              Number(
+                item.width || 0
+              ),
+
+            height:
+              Number(
+                item.height || 0
+              )
+
+          };
+
+        });
 
 
-  let upozila =
-    getAddressPart(
-      text,
-      'Upozila',
-      'Union/Ward'
-    );
+    // ========================================================
+    // GROUP BY LINE
+    // ========================================================
+
+    const lines = [];
 
 
-  let district =
-    getAddressPart(
-      text,
-      'District',
-      'RMO'
-    );
+    for (const item of items) {
+
+      let lineFound = null;
 
 
-  const parts = [];
+      for (const line of lines) {
 
-  if (home) {
-    parts.push('বাসা/হোল্ডিং: ' + home);
-  }
+        const tolerance =
+          Math.max(
+            2.5,
+            Math.min(
+              item.height || 10,
+              line.height || 10
+            ) * 0.35
+          );
 
-  if (village) {
-    parts.push('গ্রাম/রাস্তা: ' + village);
-  }
 
-  if (postOffice) {
+        if (
+          Math.abs(
+            line.y - item.y
+          ) <= tolerance
+        ) {
 
-    let postText =
-      'ডাকঘর: ' + postOffice;
+          lineFound = line;
+          break;
 
-    if (postalCodeBangla) {
-      postText += ' - ' + postalCodeBangla;
+        }
+
+      }
+
+
+      if (!lineFound) {
+
+        lineFound = {
+
+          y: item.y,
+
+          height:
+            item.height || 10,
+
+          items: []
+
+        };
+
+        lines.push(lineFound);
+
+      }
+
+
+      lineFound.items.push(item);
+
     }
 
-    parts.push(postText);
+
+    // PDF coordinate bottom -> top
+    lines.sort(
+      (a, b) => b.y - a.y
+    );
+
+
+    // ========================================================
+    // REBUILD LINES
+    // ========================================================
+
+    const pageLines = [];
+
+
+    for (const line of lines) {
+
+      line.items.sort(
+        (a, b) => a.x - b.x
+      );
+
+
+      let result = '';
+      let previous = null;
+
+
+      for (const item of line.items) {
+
+        let current =
+          item.text
+            .replace(/\r/g, '')
+            .replace(/\n/g, '');
+
+
+        if (!current) {
+          continue;
+        }
+
+
+        if (!result) {
+
+          result = current;
+
+        } else {
+
+          const previousEnd =
+            previous.x +
+            previous.width;
+
+
+          const gap =
+            item.x -
+            previousEnd;
+
+
+          /*
+           * Bengali glyph fragment-এর মধ্যে
+           * ছোট gap হলে space দেব না।
+           *
+           * বড় gap হলে নতুন word।
+           */
+
+          const gapThreshold =
+            Math.max(
+              2.8,
+              (item.height || 10) * 0.18
+            );
+
+
+          if (
+            gap >
+            gapThreshold
+          ) {
+
+            result += ' ';
+
+          }
+
+
+          result += current;
+
+        }
+
+
+        previous = item;
+
+      }
+
+
+      result =
+        result
+          .replace(/\s+/g, ' ')
+          .trim();
+
+
+      if (result) {
+        pageLines.push(result);
+      }
+
+    }
+
+
+    pages.push(
+      pageLines.join('\n')
+    );
+
+
+    page.cleanup();
+
   }
 
-  if (upozila) {
-    parts.push(upozila);
-  }
 
-  if (district) {
-    parts.push(district);
-  }
-
-  return parts.join(', ');
+  return pages.join('\n\n');
 }
 
 
@@ -453,27 +463,44 @@ function combineAddress(text) {
 // DATE
 // ============================================================
 
-function formatDateOfBirth(dobRaw) {
+function formatDateOfBirth(value) {
 
-  if (!dobRaw) return '';
+  if (!value) return '';
 
   const match =
-    String(dobRaw).match(
+    String(value).match(
       /(\d{4})[-/](\d{1,2})[-/](\d{1,2})/
     );
 
+
   if (!match) return '';
 
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
+
+  const year =
+    Number(match[1]);
+
+  const month =
+    Number(match[2]);
+
+  const day =
+    Number(match[3]);
+
 
   const months = [
-    'Jan', 'Feb', 'Mar',
-    'Apr', 'May', 'Jun',
-    'Jul', 'Aug', 'Sep',
-    'Oct', 'Nov', 'Dec'
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec'
   ];
+
 
   if (
     month < 1 ||
@@ -483,6 +510,7 @@ function formatDateOfBirth(dobRaw) {
   ) {
     return '';
   }
+
 
   return (
     String(day).padStart(2, '0') +
@@ -494,18 +522,31 @@ function formatDateOfBirth(dobRaw) {
 }
 
 
+// ============================================================
+// TODAY
+// ============================================================
+
 function formatTodayBangla() {
 
-  const today = new Date();
+  const today =
+    new Date();
+
 
   const day =
-    String(today.getDate()).padStart(2, '0');
+    String(
+      today.getDate()
+    ).padStart(2, '0');
+
 
   const month =
-    String(today.getMonth() + 1).padStart(2, '0');
+    String(
+      today.getMonth() + 1
+    ).padStart(2, '0');
+
 
   const year =
     today.getFullYear();
+
 
   return convertToBangla(
     `${day}-${month}-${year}`
@@ -514,29 +555,38 @@ function formatTodayBangla() {
 
 
 // ============================================================
-// RENDER PDF PAGE
+// PDF PAGE RENDER
+//
+// Worker disabled above.
+// তাই fake worker আর দরকার নেই।
 // ============================================================
 
-async function renderPdfPageToBuffer(pdfBuffer) {
+async function renderPdfPageToBuffer(
+  pdfBuffer
+) {
 
   const loadingTask =
     pdfjsLib.getDocument({
-      data: new Uint8Array(pdfBuffer),
+
+      data:
+        new Uint8Array(pdfBuffer),
+
       verbosity: 0,
-      stopAtErrors: false
+
+      stopAtErrors: false,
+
+      disableWorker: true
+
     });
+
 
   const pdfDocument =
     await loadingTask.promise;
 
+
   const page =
     await pdfDocument.getPage(1);
 
-
-  /*
-   * 2.0 is better than 1.5 for the small
-   * signature/photo area.
-   */
 
   const viewport =
     page.getViewport({
@@ -546,8 +596,15 @@ async function renderPdfPageToBuffer(pdfBuffer) {
 
   const canvas =
     createCanvas(
-      Math.ceil(viewport.width),
-      Math.ceil(viewport.height)
+
+      Math.ceil(
+        viewport.width
+      ),
+
+      Math.ceil(
+        viewport.height
+      )
+
     );
 
 
@@ -556,12 +613,19 @@ async function renderPdfPageToBuffer(pdfBuffer) {
 
 
   await page.render({
-    canvasContext: context,
-    viewport: viewport
+
+    canvasContext:
+      context,
+
+    viewport:
+      viewport
+
   }).promise;
 
 
-  return canvas.toBuffer('image/png');
+  return canvas.toBuffer(
+    'image/png'
+  );
 }
 
 
@@ -569,154 +633,204 @@ async function renderPdfPageToBuffer(pdfBuffer) {
 // SAFE CROP
 // ============================================================
 
-function safeCrop(rect, width, height) {
+function safeCrop(
+  rect,
+  width,
+  height
+) {
 
-  let left =
+  const left =
     Math.max(
       0,
-      Math.min(rect.left, width - 1)
+      Math.min(
+        Math.floor(rect.left),
+        width - 1
+      )
     );
 
-  let top =
+
+  const top =
     Math.max(
       0,
-      Math.min(rect.top, height - 1)
+      Math.min(
+        Math.floor(rect.top),
+        height - 1
+      )
     );
 
-  let cropWidth =
+
+  const cropWidth =
     Math.max(
       1,
       Math.min(
-        rect.width,
+        Math.floor(rect.width),
         width - left
       )
     );
 
-  let cropHeight =
+
+  const cropHeight =
     Math.max(
       1,
       Math.min(
-        rect.height,
+        Math.floor(rect.height),
         height - top
       )
     );
 
+
   return {
-    left: Math.floor(left),
-    top: Math.floor(top),
-    width: Math.floor(cropWidth),
-    height: Math.floor(cropHeight)
+
+    left,
+
+    top,
+
+    width:
+      cropWidth,
+
+    height:
+      cropHeight
+
   };
 }
 
 
 // ============================================================
 // IMAGE EXTRACTION
-//
-// THIS PDF LAYOUT:
-//
-// User Photo  -> top right
-// Signature   -> directly below photo
-//
 // ============================================================
 
-async function extractImages(pdfBuffer) {
+async function extractImages(
+  pdfBuffer
+) {
 
   const pageBuffer =
-    await renderPdfPageToBuffer(pdfBuffer);
+    await renderPdfPageToBuffer(
+      pdfBuffer
+    );
 
 
   const metadata =
-    await sharp(pageBuffer).metadata();
+    await sharp(
+      pageBuffer
+    ).metadata();
 
 
   const width =
-    Number(metadata.width || 0);
+    Number(
+      metadata.width || 0
+    );
+
 
   const height =
-    Number(metadata.height || 0);
+    Number(
+      metadata.height || 0
+    );
 
 
   if (!width || !height) {
+
     throw new Error(
-      'Unable to determine rendered PDF dimensions.'
+      'Unable to determine PDF image dimensions.'
     );
+
   }
 
 
-  // ----------------------------------------------------------
+  // ==========================================================
   // USER PHOTO
-  // ----------------------------------------------------------
+  // ==========================================================
 
   const userCropRect =
     safeCrop(
+
       {
-        left: Math.floor(width * 0.755),
-        top: Math.floor(height * 0.025),
-        width: Math.floor(width * 0.165),
-        height: Math.floor(height * 0.145)
+
+        /*
+         * PDF-এর Page 1:
+         * User photo top-right.
+         */
+
+        left:
+          width * 0.755,
+
+        top:
+          height * 0.025,
+
+        width:
+          width * 0.165,
+
+        height:
+          height * 0.145
+
       },
+
       width,
       height
+
     );
 
 
   const croppedUser =
-    await sharp(pageBuffer)
-      .extract(userCropRect)
-      .trim({
-        background: {
-          r: 255,
-          g: 255,
-          b: 255
-        }
-      })
+    await sharp(
+      pageBuffer
+    )
+      .extract(
+        userCropRect
+      )
       .png({
         compressionLevel: 9
       })
       .toBuffer();
 
 
-  const userImgBase64 =
+  const userIMG =
     'data:image/png;base64,' +
-    croppedUser.toString('base64');
+    croppedUser.toString(
+      'base64'
+    );
 
 
-  // ----------------------------------------------------------
+  // ==========================================================
   // SIGNATURE
-  // ----------------------------------------------------------
-
-  /*
-   * IMPORTANT:
-   *
-   * Old code:
-   *
-   * left = 0.05
-   *
-   * That was completely wrong for this PDF.
-   *
-   * Signature is around:
-   *
-   * X = 0.765 -> 0.915
-   * Y = 0.195 -> 0.245
-   */
+  // ==========================================================
 
   const signCropRect =
     safeCrop(
+
       {
-        left: Math.floor(width * 0.765),
-        top: Math.floor(height * 0.195),
-        width: Math.floor(width * 0.150),
-        height: Math.floor(height * 0.052)
+
+        /*
+         * PDF-এর Page 1-এ
+         * Signature photo-এর ঠিক নিচে।
+         */
+
+        left:
+          width * 0.765,
+
+        top:
+          height * 0.195,
+
+        width:
+          width * 0.150,
+
+        height:
+          height * 0.052
+
       },
+
       width,
       height
+
     );
 
 
   const croppedSign =
-    await sharp(pageBuffer)
-      .extract(signCropRect)
+    await sharp(
+      pageBuffer
+    )
+      .extract(
+        signCropRect
+      )
       .grayscale()
       .normalize()
       .threshold(210)
@@ -728,15 +842,18 @@ async function extractImages(pdfBuffer) {
         }
       })
       .extend({
+
         top: 8,
         bottom: 8,
         left: 8,
         right: 8,
+
         background: {
           r: 255,
           g: 255,
           b: 255
         }
+
       })
       .png({
         compressionLevel: 9
@@ -744,26 +861,168 @@ async function extractImages(pdfBuffer) {
       .toBuffer();
 
 
-  const signImgBase64 =
+  const signIMG =
     'data:image/png;base64,' +
-    croppedSign.toString('base64');
+    croppedSign.toString(
+      'base64'
+    );
 
 
   return {
-    userIMG: userImgBase64,
-    signIMG: signImgBase64
+    userIMG,
+    signIMG
   };
 }
 
 
 // ============================================================
-// WEB UI
+// ADDRESS
+// ============================================================
+
+function combineAddress(text) {
+
+  let home =
+    extractBetween(
+      text,
+      'Home/Holding',
+      'Post Office'
+    );
+
+
+  let village =
+    extractBetween(
+      text,
+      'Additional Village/Road',
+      'Home/Holding'
+    );
+
+
+  if (!village) {
+
+    village =
+      extractBetween(
+        text,
+        'Village/Road',
+        'Home/Holding'
+      );
+
+  }
+
+
+  let postOffice =
+    extractBetween(
+      text,
+      'Post Office',
+      'Postal Code'
+    );
+
+
+  let postalCode =
+    extractPostalCode(text);
+
+
+  let upozila =
+    extractBetween(
+      text,
+      'Upozila',
+      'Union/Ward'
+    );
+
+
+  let district =
+    extractBetween(
+      text,
+      'District',
+      'RMO'
+    );
+
+
+  home =
+    cleanBangla(home);
+
+  village =
+    cleanBangla(village);
+
+  postOffice =
+    cleanBangla(postOffice);
+
+  upozila =
+    cleanBangla(upozila);
+
+  district =
+    cleanBangla(district);
+
+
+  const parts = [];
+
+
+  if (home) {
+
+    parts.push(
+      'বাসা/হোল্ডিং: ' +
+      home
+    );
+
+  }
+
+
+  if (village) {
+
+    parts.push(
+      'গ্রাম/রাস্তা: ' +
+      village
+    );
+
+  }
+
+
+  if (postOffice) {
+
+    let post =
+      'ডাকঘর: ' +
+      postOffice;
+
+
+    if (postalCode) {
+
+      post +=
+        ' - ' +
+        convertToBangla(
+          postalCode
+        );
+
+    }
+
+
+    parts.push(post);
+
+  }
+
+
+  if (upozila) {
+    parts.push(upozila);
+  }
+
+
+  if (district) {
+    parts.push(district);
+  }
+
+
+  return parts.join(', ');
+}
+
+
+// ============================================================
+// HTML
 // ============================================================
 
 app.get('/', (req, res) => {
 
-  const html = `
+  res.send(`
+
 <!DOCTYPE html>
+
 <html lang="bn">
 
 <head>
@@ -775,7 +1034,7 @@ app.get('/', (req, res) => {
   content="width=device-width, initial-scale=1.0"
 >
 
-<title>NID PDF Data Extractor</title>
+<title>NID PDF Extraction System</title>
 
 <style>
 
@@ -784,128 +1043,194 @@ app.get('/', (req, res) => {
 }
 
 body {
+
   margin: 0;
+
   padding: 20px;
+
   background: #f4f6f9;
+
   font-family:
     Arial,
     "Noto Sans Bengali",
     sans-serif;
+
 }
 
 .container {
-  width: 100%;
+
   max-width: 650px;
+
   margin: auto;
+
   background: #fff;
+
   padding: 25px;
+
   border-radius: 12px;
+
   box-shadow:
-    0 4px 20px rgba(0,0,0,.10);
+    0 4px 20px
+    rgba(0,0,0,.10);
+
 }
 
 h2 {
+
   text-align: center;
+
   margin-top: 0;
-  color: #222;
+
 }
 
 input[type="file"] {
+
   width: 100%;
+
   padding: 12px;
-  margin: 15px 0;
-  border: 1px solid #ccc;
-  border-radius: 8px;
-  background: #fff;
+
+  margin:
+    15px 0;
+
+  border:
+    1px solid #ccc;
+
+  border-radius:
+    8px;
+
 }
 
 button {
+
   width: 100%;
-  border: 0;
+
   padding: 15px;
+
+  border: 0;
+
   border-radius: 8px;
+
   background: #087ff5;
+
   color: #fff;
-  font-size: 20px;
-  cursor: pointer;
+
+  font-size: 19px;
+
   font-weight: bold;
+
 }
 
-button:hover {
-  background: #0568cc;
+button:disabled {
+
+  opacity: .6;
+
+}
+
+#loading {
+
+  display: none;
+
+  text-align: center;
+
+  color: #ff9800;
+
+  font-weight: bold;
+
+  margin-top: 15px;
+
 }
 
 #result {
+
   display: none;
+
   margin-top: 30px;
+
 }
 
 .img-box {
+
   display: flex;
-  gap: 25px;
+
+  gap: 20px;
+
   flex-wrap: wrap;
-  align-items: flex-start;
+
 }
 
 .img-box > div {
+
   flex: 1;
+
   min-width: 180px;
+
   text-align: center;
+
 }
 
 .img-box img {
+
   max-width: 100%;
-  width: auto;
+
   height: auto;
-  border: 1px solid #ddd;
+
+  border:
+    1px solid #ddd;
+
   border-radius: 8px;
+
   padding: 5px;
+
   background: #fff;
+
 }
 
 #userImg {
+
   max-height: 300px;
+
 }
 
 #signImg {
+
   max-height: 120px;
+
 }
 
 pre {
-  margin-top: 15px;
+
   background: #1e1e1e;
+
   color: #00ffcc;
-  padding: 18px;
+
+  padding: 15px;
+
   border-radius: 8px;
+
   overflow-x: auto;
-  font-size: 13px;
-  line-height: 1.5;
+
   white-space: pre-wrap;
+
   word-break: break-word;
-}
 
-.loading {
-  display: none;
-  text-align: center;
-  margin-top: 15px;
-  color: #ff9800;
-  font-weight: bold;
-}
+  font-size: 13px;
 
-.error {
-  color: #d32f2f;
-  font-weight: bold;
 }
 
 </style>
 
 </head>
 
+
 <body>
+
 
 <div class="container">
 
-<h2>NID PDF Extraction System</h2>
+<h2>
+NID PDF Extraction System
+</h2>
+
 
 <form id="uploadForm">
 
@@ -917,31 +1242,40 @@ pre {
   required
 >
 
-<button type="submit">
-  ডাটা এক্সট্র্যাক্ট করুন
+
+<button
+  id="submitBtn"
+  type="submit"
+>
+ডাটা এক্সট্র্যাক্ট করুন
 </button>
 
 </form>
 
 
-<div id="loading" class="loading">
-  PDF প্রসেসিং হচ্ছে...
+<div id="loading">
+PDF প্রসেসিং হচ্ছে...
 </div>
 
 
 <div id="result">
 
-<h3>এক্সট্র্যাক্ট করা ছবি:</h3>
+<h3>
+এক্সট্র্যাক্ট করা ছবি:
+</h3>
+
 
 <div class="img-box">
 
+
 <div>
 
-<p><b>User Photo</b></p>
+<p>
+<b>User Photo</b>
+</p>
 
 <img
   id="userImg"
-  src=""
   alt="User Photo"
 >
 
@@ -950,47 +1284,90 @@ pre {
 
 <div>
 
-<p><b>Signature</b></p>
+<p>
+<b>Signature</b>
+</p>
 
 <img
   id="signImg"
-  src=""
   alt="Signature"
 >
 
 </div>
 
+
 </div>
 
 
-<h3>এক্সট্র্যাক্ট করা ডাটা (JSON):</h3>
+<h3>
+এক্সট্র্যাক্ট করা ডাটা (JSON):
+</h3>
+
 
 <pre id="jsonOutput"></pre>
 
+
 </div>
+
 
 </div>
 
 
 <script>
 
-document
-  .getElementById('uploadForm')
-  .addEventListener('submit', async function(e) {
+const form =
+  document.getElementById(
+    'uploadForm'
+  );
+
+
+const button =
+  document.getElementById(
+    'submitBtn'
+  );
+
+
+const loading =
+  document.getElementById(
+    'loading'
+  );
+
+
+const result =
+  document.getElementById(
+    'result'
+  );
+
+
+form.addEventListener(
+  'submit',
+  async function(e) {
 
     e.preventDefault();
 
-    const fileInput =
-      document.getElementById('pdfFile');
 
-    if (!fileInput.files[0]) {
-      alert('দয়া করে PDF নির্বাচন করুন');
+    const fileInput =
+      document.getElementById(
+        'pdfFile'
+      );
+
+
+    if (
+      !fileInput.files[0]
+    ) {
+
+      alert(
+        'দয়া করে PDF নির্বাচন করুন'
+      );
+
       return;
+
     }
 
 
     const formData =
       new FormData();
+
 
     formData.append(
       'pdf',
@@ -998,45 +1375,49 @@ document
     );
 
 
-    const loading =
-      document.getElementById('loading');
+    button.disabled = true;
 
-    const result =
-      document.getElementById('result');
+    loading.style.display =
+      'block';
 
-
-    loading.style.display = 'block';
-    result.style.display = 'none';
+    result.style.display =
+      'none';
 
 
     try {
 
       const response =
-        await fetch('/', {
-          method: 'POST',
-          body: formData
-        });
+        await fetch(
+          '/',
+          {
+            method: 'POST',
+            body: formData
+          }
+        );
 
 
       const data =
         await response.json();
 
 
-      loading.style.display = 'none';
+      if (!response.ok) {
+
+        throw new Error(
+          data.message ||
+          'Server error'
+        );
+
+      }
 
 
       if (!data.success) {
 
-        alert(
+        throw new Error(
           data.message ||
-          'PDF processing failed.'
+          'PDF processing failed'
         );
 
-        return;
       }
-
-
-      result.style.display = 'block';
 
 
       document.getElementById(
@@ -1060,31 +1441,45 @@ document
           2
         );
 
+
+      result.style.display =
+        'block';
+
+
     } catch (error) {
 
-      loading.style.display = 'none';
-
       alert(
-        'সার্ভারে সমস্যা হয়েছে: ' +
+        'Error processing PDF: ' +
         error.message
       );
+
+    } finally {
+
+      button.disabled = false;
+
+      loading.style.display =
+        'none';
+
     }
 
-  });
+  }
+
+);
 
 </script>
+
 
 </body>
 
 </html>
-`;
 
-  res.send(html);
+`);
+
 });
 
 
 // ============================================================
-// MAIN POST API
+// POST API
 // ============================================================
 
 app.post(
@@ -1095,16 +1490,22 @@ app.post(
     try {
 
       // ------------------------------------------------------
-      // FILE VALIDATION
+      // FILE CHECK
       // ------------------------------------------------------
 
       if (!req.file) {
 
         return res.status(400).json({
+
           code: 400,
+
           success: false,
-          message: 'PDF file is required.'
+
+          message:
+            'PDF file is required.'
+
         });
+
       }
 
 
@@ -1114,11 +1515,16 @@ app.post(
       ) {
 
         return res.status(400).json({
+
           code: 400,
+
           success: false,
+
           message:
-            'Invalid file type. Only PDF is allowed.'
+            'Only PDF files are allowed.'
+
         });
+
       }
 
 
@@ -1127,91 +1533,119 @@ app.post(
 
 
       // ------------------------------------------------------
-      // TEXT EXTRACTION
+      // TEXT
       // ------------------------------------------------------
 
       const text =
-        await extractPdfText(pdfBuffer);
+        await extractPdfText(
+          pdfBuffer
+        );
 
 
       // ------------------------------------------------------
-      // MAIN DATA
+      // FIELDS
       // ------------------------------------------------------
 
-      const nameBanglaRaw =
-        extractBetween(
-          text,
-          'Name(Bangla)',
-          'Name(English)'
+      const nameBangla =
+        normalizeBanglaName(
+          extractBetween(
+            text,
+            'Name(Bangla)',
+            'Name(English)'
+          )
         );
 
 
-      const nameEnglishRaw =
-        extractBetween(
-          text,
-          'Name(English)',
-          'Date of Birth'
+      const nameEnglish =
+        cleanText(
+          extractBetween(
+            text,
+            'Name(English)',
+            'Date of Birth'
+          )
+        ).toUpperCase();
+
+
+      const nid =
+        extractNid(text);
+
+
+      const pin =
+        extractPin(text);
+
+
+      const dob =
+        formatDateOfBirth(
+          extractBetween(
+            text,
+            'Date of Birth',
+            'Birth Place'
+          )
         );
 
 
-      const dobRaw =
-        extractBetween(
-          text,
-          'Date of Birth',
-          'Birth Place'
+      const fatherName =
+        normalizeBanglaName(
+          extractBetween(
+            text,
+            'Father Name',
+            'Mother Name'
+          )
         );
 
 
-      const fatherNameRaw =
-        extractBetween(
-          text,
-          'Father Name',
-          'Mother Name'
-        );
-
-
-      const motherNameRaw =
-        extractBetween(
-          text,
-          'Mother Name',
-          'Spouse Name'
+      const motherName =
+        normalizeBanglaName(
+          extractBetween(
+            text,
+            'Mother Name',
+            'Spouse Name'
+          )
         );
 
 
       const gender =
-        extractBetween(
-          text,
-          'Gender',
-          'Marital'
+        cleanText(
+          extractBetween(
+            text,
+            'Gender',
+            'Marital'
+          )
         );
 
 
       const religion =
-        extractBetween(
-          text,
-          'Religion',
-          'Religion Other'
+        cleanText(
+          extractBetween(
+            text,
+            'Religion',
+            'Religion Other'
+          )
         );
 
 
       const birthPlace =
-        extractBetween(
-          text,
-          'Birth Place',
-          'Birth Other'
+        cleanBangla(
+          extractBetween(
+            text,
+            'Birth Place',
+            'Birth Other'
+          )
         );
 
 
       const bloodGroup =
-        extractBetween(
-          text,
-          'Blood Group',
-          'TIN'
+        cleanText(
+          extractBetween(
+            text,
+            'Blood Group',
+            'TIN'
+          )
         );
 
 
       // ------------------------------------------------------
-      // IMAGE EXTRACTION
+      // IMAGES
       // ------------------------------------------------------
 
       let images = {
@@ -1230,79 +1664,16 @@ app.post(
       } catch (imageError) {
 
         console.error(
-          'Image extraction error:',
+          'IMAGE ERROR:',
           imageError
         );
 
-        /*
-         * Keep API working even if image
-         * extraction fails.
-         */
       }
 
 
       // ------------------------------------------------------
       // RESPONSE
       // ------------------------------------------------------
-
-      const responseData = {
-
-        nameBangla:
-          normalizePersonName(
-            nameBanglaRaw
-          ),
-
-        nameEnglish:
-          cleanText(
-            nameEnglishRaw
-          ).toUpperCase(),
-
-        nationalId:
-          extractNid(text),
-
-        pin:
-          extractPin(text),
-
-        dateOfBirth:
-          formatDateOfBirth(
-            dobRaw
-          ),
-
-        dateOfToday:
-          formatTodayBangla(),
-
-        fatherName:
-          normalizeBanglaName(
-            fatherNameRaw
-          ),
-
-        motherName:
-          normalizeBanglaName(
-            motherNameRaw
-          ),
-
-        gender:
-          cleanText(gender),
-
-        religion:
-          cleanText(religion),
-
-        birthPlace:
-          cleanBangla(birthPlace),
-
-        bloodGroup:
-          cleanText(bloodGroup),
-
-        userIMG:
-          images.userIMG,
-
-        signIMG:
-          images.signIMG,
-
-        address:
-          combineAddress(text)
-      };
-
 
       return res.status(200).json({
 
@@ -1313,15 +1684,53 @@ app.post(
         message:
           'Data fetched successfully',
 
-        data:
-          responseData
+        data: {
+
+          nameBangla,
+
+          nameEnglish,
+
+          nationalId:
+            nid,
+
+          pin,
+
+          dateOfBirth:
+            dob,
+
+          dateOfToday:
+            formatTodayBangla(),
+
+          fatherName,
+
+          motherName,
+
+          gender,
+
+          religion,
+
+          birthPlace,
+
+          bloodGroup,
+
+          userIMG:
+            images.userIMG,
+
+          signIMG:
+            images.signIMG,
+
+          address:
+            combineAddress(text)
+
+        }
+
       });
 
 
     } catch (error) {
 
       console.error(
-        'PDF Processing Error:',
+        'PDF PROCESSING ERROR:',
         error
       );
 
@@ -1335,6 +1744,7 @@ app.post(
         message:
           'Error processing PDF: ' +
           error.message
+
       });
 
     }
@@ -1344,7 +1754,26 @@ app.post(
 
 
 // ============================================================
-// EXPORT
+// LOCAL SERVER
 // ============================================================
+
+if (require.main === module) {
+
+  const PORT =
+    process.env.PORT || 3000;
+
+  app.listen(
+    PORT,
+    () => {
+
+      console.log(
+        `Server running on port ${PORT}`
+      );
+
+    }
+  );
+
+}
+
 
 module.exports = app;
