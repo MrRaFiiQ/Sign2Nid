@@ -27,24 +27,22 @@ function extractBetween(text, start, end) {
   return match ? match[1] : '';
 }
 
-// Clean Text & Strip Null Characters (\u0000) and Control Bytes
+// Clean Text preserving Bengali Vowels (E-kar, O-kar) and removing UTF-8 null bytes & tables
 function cleanText(text) {
   if (!text) return '';
   return text
-    .replace(/\0/g, '') // Remove Null Bytes
-    .replace(/[\u0000-\u001F\u007F-\u009F]/g, '') // Remove Invisible Control Chars
-    .replace(/["\r\n\t,]/g, ' ')
+    .normalize('NFC')
+    .replace(/\0/g, '') // Only remove null bytes
+    .replace(/[\r\n\t|]/g, ' ') // Clean newlines, tabs & pdf-parse table separators
     .replace(/\s+/g, ' ')
     .trim();
 }
 
 function cleanBanglaName(text) {
   if (!text) return '';
-  let cleaned = text
-    .replace(/\0/g, '')
-    .replace(/[\u0000-\u001F\u007F-\u009F]/g, '')
+  let cleaned = cleanText(text)
     .replace(/halnagad_\d+/gi, '')
-    .replace(/Tag/gi, '')
+    .replace(/\bTag\b/gi, '')
     .replace(/Name\(Bangla\)/gi, '');
   return cleanText(cleaned);
 }
@@ -118,29 +116,7 @@ function formatTodayBangla() {
   return convertToBangla(`${day}-${month}-${year}`);
 }
 
-// Fast PDF Page Renderer optimized for Vercel Serverless
-async function renderPdfPageToBuffer(pdfBuffer) {
-  const loadingTask = pdfjsLib.getDocument({
-    data: new Uint8Array(pdfBuffer),
-    verbosity: 0,
-    stopAtErrors: false
-  });
-  const pdfDocument = await loadingTask.promise;
-  const page = await pdfDocument.getPage(1);
-
-  const viewport = page.getViewport({ scale: 1.5 }); // 1.5 scale is super fast & crisp
-  const canvas = createCanvas(viewport.width, viewport.height);
-  const context = canvas.getContext('2d');
-
-  await page.render({
-    canvasContext: context,
-    viewport: viewport
-  }).promise;
-
-  return canvas.toBuffer('image/png');
-}
-
-// Direct Fast JPEG Stream Extractor (Fallback Method)
+// Ultra Fast PDF Embedded JPEG Extractor
 function extractJpegsFromBuffer(buffer) {
   const jpegs = [];
   const soi = Buffer.from([0xFF, 0xD8, 0xFF]);
@@ -154,12 +130,34 @@ function extractJpegsFromBuffer(buffer) {
     if (end === -1) break;
 
     const jpegBuffer = buffer.subarray(start, end + 2);
-    if (jpegBuffer.length > 2000) { // Filter out tiny thumbnails
+    if (jpegBuffer.length > 1500) { // Filter out tiny PDF icons
       jpegs.push(jpegBuffer);
     }
     offset = end + 2;
   }
   return jpegs;
+}
+
+// Fast PDF Page Canvas Render (Fallback for cropping)
+async function renderPdfPageToBuffer(pdfBuffer) {
+  const loadingTask = pdfjsLib.getDocument({
+    data: new Uint8Array(pdfBuffer),
+    verbosity: 0,
+    stopAtErrors: false
+  });
+  const pdfDocument = await loadingTask.promise;
+  const page = await pdfDocument.getPage(1);
+
+  const viewport = page.getViewport({ scale: 1.5 });
+  const canvas = createCanvas(viewport.width, viewport.height);
+  const context = canvas.getContext('2d');
+
+  await page.render({
+    canvasContext: context,
+    viewport: viewport
+  }).promise;
+
+  return canvas.toBuffer('image/png');
 }
 
 // WEB UI - HTML UPLOAD PAGE (GET /)
@@ -180,8 +178,8 @@ app.get('/', (req, res) => {
       button:hover { background: #0051a2; }
       #result { margin-top: 25px; text-align: left; display: none; }
       .img-box { display: flex; gap: 15px; margin-top: 15px; flex-wrap: wrap; }
-      .img-box div { text-align: center; flex: 1; min-width: 120px; }
-      .img-box img { max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 5px; padding: 5px; background: #fafafa; }
+      .img-item { text-align: center; flex: 1; min-width: 120px; }
+      .img-item img { max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 5px; padding: 5px; background: #fafafa; }
       pre { background: #1e1e1e; color: #00ffcc; padding: 15px; border-radius: 5px; overflow-x: auto; font-size: 13px; line-height: 1.4; }
       .loading { color: #ff9800; font-weight: bold; margin-top: 15px; display: none; }
     </style>
@@ -198,11 +196,11 @@ app.get('/', (req, res) => {
       <div id="result">
         <h3>এক্সট্র্যাক্ট করা ছবি:</h3>
         <div class="img-box">
-          <div>
+          <div class="img-item" id="userBox">
             <p><b>User Photo</b></p>
             <img id="userImg" src="" alt="User Photo">
           </div>
-          <div>
+          <div class="img-item" id="signBox">
             <p><b>Signature</b></p>
             <img id="signImg" src="" alt="Signature">
           </div>
@@ -233,8 +231,21 @@ app.get('/', (req, res) => {
           
           if (data.success) {
             document.getElementById('result').style.display = 'block';
-            document.getElementById('userImg').src = data.data.userIMG || '';
-            document.getElementById('signImg').src = data.data.signIMG || '';
+            
+            if (data.data.userIMG) {
+              document.getElementById('userImg').src = data.data.userIMG;
+              document.getElementById('userBox').style.display = 'block';
+            } else {
+              document.getElementById('userBox').style.display = 'none';
+            }
+
+            if (data.data.signIMG) {
+              document.getElementById('signImg').src = data.data.signIMG;
+              document.getElementById('signBox').style.display = 'block';
+            } else {
+              document.getElementById('signBox').style.display = 'none';
+            }
+
             document.getElementById('jsonOutput').textContent = JSON.stringify(data, null, 2);
           } else {
             alert('Error: ' + data.message);
@@ -275,57 +286,38 @@ app.post('/', upload.single('pdf'), async (req, res) => {
     const dobRaw = cleanText(extractBetween(text, 'Date of Birth', 'Birth Place'));
     const dob = formatDateOfBirth(dobRaw);
 
-    // 2. High Resolution Image Rendering & Cropping
+    // 2. Fast Image Extraction
     let userImgBase64 = '';
     let signImgBase64 = '';
 
-    try {
-      const page1Buffer = await renderPdfPageToBuffer(pdfBuffer);
-      const metadata = await sharp(page1Buffer).metadata();
+    // Step A: Ultra Fast Direct Stream Extraction from PDF
+    const extractedJpegs = extractJpegsFromBuffer(pdfBuffer);
+    if (extractedJpegs.length > 0) {
+      userImgBase64 = `data:image/jpeg;base64,${extractedJpegs[0].toString('base64')}`;
+    }
+    if (extractedJpegs.length > 1) {
+      signImgBase64 = `data:image/jpeg;base64,${extractedJpegs[1].toString('base64')}`;
+    }
 
-      const w = metadata.width;
-      const h = metadata.height;
+    // Step B: Canvas Fallback if Embedded Extraction Misses User Image
+    if (!userImgBase64) {
+      try {
+        const page1Buffer = await renderPdfPageToBuffer(pdfBuffer);
+        const metadata = await sharp(page1Buffer).metadata();
+        const w = metadata.width;
+        const h = metadata.height;
 
-      // User Image Crop Rect
-      const userCropRect = {
-        left: Math.floor(w * 0.58),
-        top: Math.floor(h * 0.005),
-        width: Math.floor(w * 0.38),
-        height: Math.floor(h * 0.23)
-      };
+        const userCropRect = {
+          left: Math.floor(w * 0.58),
+          top: Math.floor(h * 0.005),
+          width: Math.floor(w * 0.38),
+          height: Math.floor(h * 0.23)
+        };
 
-      const croppedUser = await sharp(page1Buffer)
-        .extract(userCropRect)
-        .png()
-        .toBuffer();
-      userImgBase64 = `data:image/png;base64,${croppedUser.toString('base64')}`;
-
-      // Signature Crop Rect
-      const signCropRect = {
-        left: Math.floor(w * 0.05),
-        top: Math.floor(h * 0.24),
-        width: Math.floor(w * 0.60),
-        height: Math.floor(h * 0.06)
-      };
-
-      const croppedSign = await sharp(page1Buffer)
-        .extract(signCropRect)
-        .threshold(160)
-        .trim()
-        .png()
-        .toBuffer();
-      signImgBase64 = `data:image/png;base64,${croppedSign.toString('base64')}`;
-
-    } catch (imgError) {
-      console.error('Canvas Render Error, Using Fast Stream Extraction Fallback:', imgError);
-      
-      // FALLBACK: Fast Stream Extraction if Canvas Fails
-      const extractedJpegs = extractJpegsFromBuffer(pdfBuffer);
-      if (extractedJpegs.length > 0) {
-        userImgBase64 = `data:image/jpeg;base64,${extractedJpegs[0].toString('base64')}`;
-      }
-      if (extractedJpegs.length > 1) {
-        signImgBase64 = `data:image/jpeg;base64,${extractedJpegs[1].toString('base64')}`;
+        const croppedUser = await sharp(page1Buffer).extract(userCropRect).png().toBuffer();
+        userImgBase64 = `data:image/png;base64,${croppedUser.toString('base64')}`;
+      } catch (imgError) {
+        console.error('User Canvas Crop Error:', imgError);
       }
     }
 
