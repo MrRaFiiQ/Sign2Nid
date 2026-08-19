@@ -6,6 +6,11 @@ const { createCanvas } = require('@napi-rs/canvas');
 const sharp = require('sharp');
 const cors = require('cors');
 
+// Disable PDF.js Worker requirement for Vercel Serverless Environment
+if (pdfjsLib.GlobalWorkerOptions) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = '';
+}
+
 const app = express();
 app.use(cors());
 
@@ -22,9 +27,12 @@ function extractBetween(text, start, end) {
   return match ? match[1] : '';
 }
 
+// Clean Text & Strip Null Characters (\u0000) and Control Bytes
 function cleanText(text) {
   if (!text) return '';
   return text
+    .replace(/\0/g, '') // Remove Null Bytes
+    .replace(/[\u0000-\u001F\u007F-\u009F]/g, '') // Remove Invisible Control Chars
     .replace(/["\r\n\t,]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -33,6 +41,8 @@ function cleanText(text) {
 function cleanBanglaName(text) {
   if (!text) return '';
   let cleaned = text
+    .replace(/\0/g, '')
+    .replace(/[\u0000-\u001F\u007F-\u009F]/g, '')
     .replace(/halnagad_\d+/gi, '')
     .replace(/Tag/gi, '')
     .replace(/Name\(Bangla\)/gi, '');
@@ -108,16 +118,17 @@ function formatTodayBangla() {
   return convertToBangla(`${day}-${month}-${year}`);
 }
 
-// Render PDF page to Buffer without node-canvas
+// Fast PDF Page Renderer optimized for Vercel Serverless
 async function renderPdfPageToBuffer(pdfBuffer) {
   const loadingTask = pdfjsLib.getDocument({
     data: new Uint8Array(pdfBuffer),
-    verbosity: 0
+    verbosity: 0,
+    stopAtErrors: false
   });
   const pdfDocument = await loadingTask.promise;
   const page = await pdfDocument.getPage(1);
 
-  const viewport = page.getViewport({ scale: 2.0 });
+  const viewport = page.getViewport({ scale: 1.5 }); // 1.5 scale is super fast & crisp
   const canvas = createCanvas(viewport.width, viewport.height);
   const context = canvas.getContext('2d');
 
@@ -127,6 +138,28 @@ async function renderPdfPageToBuffer(pdfBuffer) {
   }).promise;
 
   return canvas.toBuffer('image/png');
+}
+
+// Direct Fast JPEG Stream Extractor (Fallback Method)
+function extractJpegsFromBuffer(buffer) {
+  const jpegs = [];
+  const soi = Buffer.from([0xFF, 0xD8, 0xFF]);
+  const eoi = Buffer.from([0xFF, 0xD9]);
+  let offset = 0;
+
+  while (offset < buffer.length) {
+    const start = buffer.indexOf(soi, offset);
+    if (start === -1) break;
+    const end = buffer.indexOf(eoi, start + 3);
+    if (end === -1) break;
+
+    const jpegBuffer = buffer.subarray(start, end + 2);
+    if (jpegBuffer.length > 2000) { // Filter out tiny thumbnails
+      jpegs.push(jpegBuffer);
+    }
+    offset = end + 2;
+  }
+  return jpegs;
 }
 
 // WEB UI - HTML UPLOAD PAGE (GET /)
@@ -143,13 +176,13 @@ app.get('/', (req, res) => {
       .container { max-width: 600px; background: #fff; padding: 25px; margin: auto; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
       h2 { color: #333; margin-bottom: 20px; }
       input[type="file"] { margin: 15px 0; padding: 10px; width: 100%; border: 1px solid #ccc; border-radius: 5px; box-sizing: border-box; }
-      button { background: #0070f3; color: white; border: none; padding: 12px 20px; font-size: 16px; border-radius: 5px; cursor: pointer; width: 100%; }
+      button { background: #0070f3; color: white; border: none; padding: 12px 20px; font-size: 16px; border-radius: 5px; cursor: pointer; width: 100%; font-weight: bold; }
       button:hover { background: #0051a2; }
       #result { margin-top: 25px; text-align: left; display: none; }
-      .img-box { display: flex; gap: 15px; margin-top: 15px; }
-      .img-box div { text-align: center; }
+      .img-box { display: flex; gap: 15px; margin-top: 15px; flex-wrap: wrap; }
+      .img-box div { text-align: center; flex: 1; min-width: 120px; }
       .img-box img { max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 5px; padding: 5px; background: #fafafa; }
-      pre { background: #222; color: #00ffcc; padding: 15px; border-radius: 5px; overflow-x: auto; font-size: 13px; }
+      pre { background: #1e1e1e; color: #00ffcc; padding: 15px; border-radius: 5px; overflow-x: auto; font-size: 13px; line-height: 1.4; }
       .loading { color: #ff9800; font-weight: bold; margin-top: 15px; display: none; }
     </style>
   </head>
@@ -253,12 +286,12 @@ app.post('/', upload.single('pdf'), async (req, res) => {
       const w = metadata.width;
       const h = metadata.height;
 
-      // User Image Crop Logic
+      // User Image Crop Rect
       const userCropRect = {
-        left: Math.floor(w * 0.60),
+        left: Math.floor(w * 0.58),
         top: Math.floor(h * 0.005),
-        width: Math.floor(w * 0.36),
-        height: Math.floor(h * 0.22)
+        width: Math.floor(w * 0.38),
+        height: Math.floor(h * 0.23)
       };
 
       const croppedUser = await sharp(page1Buffer)
@@ -267,12 +300,12 @@ app.post('/', upload.single('pdf'), async (req, res) => {
         .toBuffer();
       userImgBase64 = `data:image/png;base64,${croppedUser.toString('base64')}`;
 
-      // Signature Crop & Auto-trim Background Logic
+      // Signature Crop Rect
       const signCropRect = {
         left: Math.floor(w * 0.05),
-        top: Math.floor(h * 0.25),
-        width: Math.floor(w * 0.63),
-        height: Math.floor(h * 0.05)
+        top: Math.floor(h * 0.24),
+        width: Math.floor(w * 0.60),
+        height: Math.floor(h * 0.06)
       };
 
       const croppedSign = await sharp(page1Buffer)
@@ -284,7 +317,16 @@ app.post('/', upload.single('pdf'), async (req, res) => {
       signImgBase64 = `data:image/png;base64,${croppedSign.toString('base64')}`;
 
     } catch (imgError) {
-      console.error('Image Extraction Error:', imgError);
+      console.error('Canvas Render Error, Using Fast Stream Extraction Fallback:', imgError);
+      
+      // FALLBACK: Fast Stream Extraction if Canvas Fails
+      const extractedJpegs = extractJpegsFromBuffer(pdfBuffer);
+      if (extractedJpegs.length > 0) {
+        userImgBase64 = `data:image/jpeg;base64,${extractedJpegs[0].toString('base64')}`;
+      }
+      if (extractedJpegs.length > 1) {
+        signImgBase64 = `data:image/jpeg;base64,${extractedJpegs[1].toString('base64')}`;
+      }
     }
 
     // Response Object Structure
