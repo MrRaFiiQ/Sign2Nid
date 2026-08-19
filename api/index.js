@@ -6,7 +6,6 @@ const { createCanvas } = require('@napi-rs/canvas');
 const sharp = require('sharp');
 const cors = require('cors');
 
-// Disable PDF.js Worker requirement for Vercel Serverless Environment
 if (pdfjsLib.GlobalWorkerOptions) {
   pdfjsLib.GlobalWorkerOptions.workerSrc = '';
 }
@@ -16,85 +15,31 @@ app.use(cors());
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-// Helper Functions
-function escapeRegExp(string) {
-  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function extractBetween(text, start, end) {
-  const regex = new RegExp(`${escapeRegExp(start)}([\\s\\S]*?)${escapeRegExp(end)}`, 'i');
-  const match = text.match(regex);
-  return match ? match[1] : '';
-}
-
-// Clean Text preserving Bengali Vowels (E-kar, O-kar) and removing UTF-8 null bytes & tables
+// Clean Text preserving Bangla Glyphs
 function cleanText(text) {
   if (!text) return '';
   return text
     .normalize('NFC')
-    .replace(/\0/g, '') // Only remove null bytes
-    .replace(/[\r\n\t|]/g, ' ') // Clean newlines, tabs & pdf-parse table separators
+    .replace(/[\0\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+    .replace(/["\r\n\t|]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
-function cleanBanglaName(text) {
+// Precise Key-Value Extractor for NID PDFs
+function getFieldValue(text, fieldName) {
   if (!text) return '';
-  let cleaned = cleanText(text)
-    .replace(/halnagad_\d+/gi, '')
-    .replace(/\bTag\b/gi, '')
-    .replace(/Name\(Bangla\)/gi, '');
-  return cleanText(cleaned);
+  const escapedField = fieldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const regex = new RegExp(`${escapedField}[\\s\\r\\n]*\\|[\\s\\r\\n]*([^|\\r\\n]+)`, 'i');
+  const match = text.match(regex);
+  return match ? cleanText(match[1]) : '';
 }
 
 function convertToBangla(numberStr) {
+  if (!numberStr) return '';
   const englishDigits = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
   const banglaDigits = ['০', '১', '২', '৩', '৪', '৫', '৬', '৭', '৮', '৯'];
   return numberStr.toString().replace(/[0-9]/g, (w) => banglaDigits[englishDigits.indexOf(w)]);
-}
-
-function extractNid(text) {
-  const match = text.match(/National ID[^\d]*(\d{10,17})/i);
-  return match ? match[1] : '';
-}
-
-function extractPin(text) {
-  const match = text.match(/Pin[^\d]*(\d{10,17})/i);
-  return match ? match[1] : '';
-}
-
-function extractPostalCode(text) {
-  const match = text.match(/Postal Code[^\d০-৯]*([0-9০-৯]{4})/u);
-  return match ? match[1] : '২০৫০';
-}
-
-function combineAddress(text) {
-  let villageRaw = extractBetween(text, 'Village/Road', 'Home/Holding');
-  if (!villageRaw) villageRaw = extractBetween(text, 'Village/Road', 'Post Office');
-  let village = cleanText(villageRaw.replace(/Village\/Road|Home\/Holding|Additional|No\.|No/gi, ''));
-
-  let homeRaw = extractBetween(text, 'Home/Holding', 'Post Office');
-  if (!homeRaw) homeRaw = extractBetween(text, 'Home/Holding', 'Postal Code');
-  let home = cleanText(homeRaw.replace(/Home\/Holding|Village\/Road|Additional|No\.|No/gi, ''));
-
-  let postOffice = cleanText(extractBetween(text, 'Post Office', 'Postal Code'));
-  let postalCode = extractPostalCode(text);
-  let postalCodeBangla = convertToBangla(postalCode);
-
-  let upozila = cleanText(extractBetween(text, 'Upozila', 'Union'));
-  if (!upozila) upozila = cleanText(extractBetween(text, 'Upozila', 'Municipality'));
-
-  let district = cleanText(extractBetween(text, 'District', 'RMO'));
-  if (!district) district = cleanText(extractBetween(text, 'District', 'City'));
-
-  let parts = [];
-  if (home) parts.push('বাসা/হোল্ডিং: ' + home);
-  if (village) parts.push('গ্রাম/রাস্তা: ' + village);
-  parts.push('ডাকঘর: ' + postOffice + ' -' + postalCodeBangla);
-  if (upozila) parts.push(upozila);
-  if (district) parts.push(district);
-
-  return parts.join(', ');
 }
 
 function formatDateOfBirth(dobRaw) {
@@ -116,7 +61,32 @@ function formatTodayBangla() {
   return convertToBangla(`${day}-${month}-${year}`);
 }
 
-// Ultra Fast PDF Embedded JPEG Extractor
+function combineAddress(text) {
+  let home = getFieldValue(text, 'Home/Holding');
+  if (!home) home = getFieldValue(text, 'Home/Holding No');
+
+  let village = getFieldValue(text, 'Additional\nVillage/Road');
+  if (!village) village = getFieldValue(text, 'Village/Road');
+
+  let postOffice = getFieldValue(text, 'Post Office');
+  let postalCode = getFieldValue(text, 'Postal Code');
+  if (!postalCode) postalCode = '১৩২৪';
+  let postalCodeBangla = convertToBangla(postalCode);
+
+  let upozila = getFieldValue(text, 'Upozila');
+  let district = getFieldValue(text, 'District');
+
+  let parts = [];
+  if (home) parts.push('বাসা/হোল্ডিং: ' + home);
+  if (village) parts.push('গ্রাম/রাস্তা: ' + village);
+  if (postOffice) parts.push('ডাকঘর: ' + postOffice + ' -' + postalCodeBangla);
+  if (upozila) parts.push(upozila);
+  if (district) parts.push(district);
+
+  return parts.join(', ');
+}
+
+// Fast Embedded Image Extractor
 function extractJpegsFromBuffer(buffer) {
   const jpegs = [];
   const soi = Buffer.from([0xFF, 0xD8, 0xFF]);
@@ -130,7 +100,7 @@ function extractJpegsFromBuffer(buffer) {
     if (end === -1) break;
 
     const jpegBuffer = buffer.subarray(start, end + 2);
-    if (jpegBuffer.length > 1500) { // Filter out tiny PDF icons
+    if (jpegBuffer.length > 2000) {
       jpegs.push(jpegBuffer);
     }
     offset = end + 2;
@@ -138,7 +108,7 @@ function extractJpegsFromBuffer(buffer) {
   return jpegs;
 }
 
-// Fast PDF Page Canvas Render (Fallback for cropping)
+// Render PDF Page Canvas
 async function renderPdfPageToBuffer(pdfBuffer) {
   const loadingTask = pdfjsLib.getDocument({
     data: new Uint8Array(pdfBuffer),
@@ -148,7 +118,7 @@ async function renderPdfPageToBuffer(pdfBuffer) {
   const pdfDocument = await loadingTask.promise;
   const page = await pdfDocument.getPage(1);
 
-  const viewport = page.getViewport({ scale: 1.5 });
+  const viewport = page.getViewport({ scale: 2.0 });
   const canvas = createCanvas(viewport.width, viewport.height);
   const context = canvas.getContext('2d');
 
@@ -160,7 +130,7 @@ async function renderPdfPageToBuffer(pdfBuffer) {
   return canvas.toBuffer('image/png');
 }
 
-// WEB UI - HTML UPLOAD PAGE (GET /)
+// WEB UI (GET /)
 app.get('/', (req, res) => {
   const html = `
   <!DOCTYPE html>
@@ -275,22 +245,22 @@ app.post('/', upload.single('pdf'), async (req, res) => {
 
     const pdfBuffer = req.file.buffer;
 
-    // 1. Text Parsing
+    // 1. Text Parsing using Key-Value matching
     const parsedPdf = await pdfParse(pdfBuffer);
     const text = parsedPdf.text;
 
-    const nameBangla = cleanBanglaName(extractBetween(text, 'Name(Bangla)', 'Name(English)'));
-    const nameEnglish = cleanText(extractBetween(text, 'Name(English)', 'Date of Birth')).toUpperCase();
-    const nid = extractNid(text);
-    const pin = extractPin(text);
-    const dobRaw = cleanText(extractBetween(text, 'Date of Birth', 'Birth Place'));
+    const nameBangla = getFieldValue(text, 'Name(Bangla)');
+    const nameEnglish = getFieldValue(text, 'Name(English)').toUpperCase();
+    const nid = getFieldValue(text, 'National ID');
+    const pin = getFieldValue(text, 'Pin');
+    const dobRaw = getFieldValue(text, 'Date of Birth');
     const dob = formatDateOfBirth(dobRaw);
 
-    // 2. Fast Image Extraction
+    // 2. Extract User Photo and Canvas Signature
     let userImgBase64 = '';
     let signImgBase64 = '';
 
-    // Step A: Ultra Fast Direct Stream Extraction from PDF
+    // Step A: Extract Embedded User Photo
     const extractedJpegs = extractJpegsFromBuffer(pdfBuffer);
     if (extractedJpegs.length > 0) {
       userImgBase64 = `data:image/jpeg;base64,${extractedJpegs[0].toString('base64')}`;
@@ -299,26 +269,41 @@ app.post('/', upload.single('pdf'), async (req, res) => {
       signImgBase64 = `data:image/jpeg;base64,${extractedJpegs[1].toString('base64')}`;
     }
 
-    // Step B: Canvas Fallback if Embedded Extraction Misses User Image
-    if (!userImgBase64) {
-      try {
-        const page1Buffer = await renderPdfPageToBuffer(pdfBuffer);
-        const metadata = await sharp(page1Buffer).metadata();
-        const w = metadata.width;
-        const h = metadata.height;
+    // Step B: Canvas Fallback & Signature Crop from Page Render
+    try {
+      const page1Buffer = await renderPdfPageToBuffer(pdfBuffer);
+      const metadata = await sharp(page1Buffer).metadata();
+      const w = metadata.width;
+      const h = metadata.height;
 
+      if (!userImgBase64) {
         const userCropRect = {
-          left: Math.floor(w * 0.58),
+          left: Math.floor(w * 0.60),
           top: Math.floor(h * 0.005),
-          width: Math.floor(w * 0.38),
-          height: Math.floor(h * 0.23)
+          width: Math.floor(w * 0.36),
+          height: Math.floor(h * 0.22)
         };
-
         const croppedUser = await sharp(page1Buffer).extract(userCropRect).png().toBuffer();
         userImgBase64 = `data:image/png;base64,${croppedUser.toString('base64')}`;
-      } catch (imgError) {
-        console.error('User Canvas Crop Error:', imgError);
       }
+
+      if (!signImgBase64) {
+        const signCropRect = {
+          left: Math.floor(w * 0.05),
+          top: Math.floor(h * 0.24),
+          width: Math.floor(w * 0.55),
+          height: Math.floor(h * 0.07)
+        };
+        const croppedSign = await sharp(page1Buffer)
+          .extract(signCropRect)
+          .threshold(180)
+          .trim()
+          .png()
+          .toBuffer();
+        signImgBase64 = `data:image/png;base64,${croppedSign.toString('base64')}`;
+      }
+    } catch (imgError) {
+      console.error('Canvas Crop Handling Error:', imgError);
     }
 
     // Response Object Structure
@@ -329,12 +314,12 @@ app.post('/', upload.single('pdf'), async (req, res) => {
       pin: pin,
       dateOfBirth: dob,
       dateOfToday: formatTodayBangla(),
-      fatherName: cleanText(extractBetween(text, 'Father Name', 'Mother Name')),
-      motherName: cleanText(extractBetween(text, 'Mother Name', 'Spouse Name')),
-      gender: cleanText(extractBetween(text, 'Gender', 'Marital')),
-      religion: cleanText(extractBetween(text, 'Religion', 'Religion Other')),
-      birthPlace: cleanText(extractBetween(text, 'Birth Place', 'Birth Other')),
-      bloodGroup: cleanText(extractBetween(text, 'Blood Group', 'TIN')),
+      fatherName: getFieldValue(text, 'Father Name'),
+      motherName: getFieldValue(text, 'Mother Name'),
+      gender: getFieldValue(text, 'Gender'),
+      religion: getFieldValue(text, 'Religion'),
+      birthPlace: getFieldValue(text, 'Birth Place'),
+      bloodGroup: getFieldValue(text, 'Blood Group'),
       userIMG: userImgBase64,
       signIMG: signImgBase64,
       address: combineAddress(text)
