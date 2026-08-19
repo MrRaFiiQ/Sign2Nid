@@ -1,7 +1,8 @@
 const express = require('express');
 const multer = require('multer');
 const pdfParse = require('pdf-parse');
-const pdfImgConvert = require('pdf-img-convert');
+const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
+const { createCanvas } = require('@napi-rs/canvas');
 const sharp = require('sharp');
 const cors = require('cors');
 
@@ -107,119 +108,117 @@ function formatTodayBangla() {
   return convertToBangla(`${day}-${month}-${year}`);
 }
 
-// MAIN API ENDPOINT
-app.post('/', upload.single('pdf'), async (req, res) => {
-  try {
-    if (!req.file || req.file.mimetype !== 'application/pdf') {
-      return res.status(400).json({
-        code: 400,
-        success: false,
-        message: 'Invalid file type. Only PDF files are allowed.'
-      });
-    }
+// Render PDF page to Buffer without node-canvas
+async function renderPdfPageToBuffer(pdfBuffer) {
+  const loadingTask = pdfjsLib.getDocument({
+    data: new Uint8Array(pdfBuffer),
+    verbosity: 0
+  });
+  const pdfDocument = await loadingTask.promise;
+  const page = await pdfDocument.getPage(1);
 
-    const pdfBuffer = req.file.buffer;
+  const viewport = page.getViewport({ scale: 2.0 });
+  const canvas = createCanvas(viewport.width, viewport.height);
+  const context = canvas.getContext('2d');
 
-    // 1. Text Parsing
-    const parsedPdf = await pdfParse(pdfBuffer);
-    const text = parsedPdf.text;
+  await page.render({
+    canvasContext: context,
+    viewport: viewport
+  }).promise;
 
-    const nameBangla = cleanBanglaName(extractBetween(text, 'Name(Bangla)', 'Name(English)'));
-    const nameEnglish = cleanText(extractBetween(text, 'Name(English)', 'Date of Birth')).toUpperCase();
-    const nid = extractNid(text);
-    const pin = extractPin(text);
-    const dobRaw = cleanText(extractBetween(text, 'Date of Birth', 'Birth Place'));
-    const dob = formatDateOfBirth(dobRaw);
-
-    // 2. High Resolution Image Rendering (Page 1)
-    let userImgBase64 = '';
-    let signImgBase64 = '';
-
-    try {
-      const outputImages = await pdfImgConvert.convert(pdfBuffer, { page_numbers: [1], scale: 2.0 });
-      if (outputImages && outputImages.length > 0) {
-        const page1Buffer = Buffer.from(outputImages[0]);
-        const imagePipeline = sharp(page1Buffer);
-        const metadata = await imagePipeline.metadata();
-
-        const w = metadata.width;
-        const h = metadata.height;
-
-        // User Image Crop Logic
-        const userCropRect = {
-          left: Math.floor(w * 0.60),
-          top: Math.floor(h * 0.005),
-          width: Math.floor(w * 0.36),
-          height: Math.floor(h * 0.22)
-        };
-
-        const croppedUser = await sharp(page1Buffer)
-          .extract(userCropRect)
-          .png()
-          .toBuffer();
-        userImgBase64 = `data:image/png;base64,${croppedUser.toString('base64')}`;
-
-        // Signature Crop & Auto-trim Background Logic
-        const signCropRect = {
-          left: Math.floor(w * 0.05),
-          top: Math.floor(h * 0.25),
-          width: Math.floor(w * 0.63),
-          height: Math.floor(h * 0.05)
-        };
-
-        const croppedSign = await sharp(page1Buffer)
-          .extract(signCropRect)
-          .threshold(160)
-          .trim()
-          .png()
-          .toBuffer();
-        signImgBase64 = `data:image/png;base64,${croppedSign.toString('base64')}`;
-      }
-    } catch (imgError) {
-      console.error('Image Extraction Error:', imgError);
-    }
-
-    // Response Object Structure
-    const responseData = {
-      nameBangla: nameBangla,
-      nameEnglish: nameEnglish,
-      nationalId: nid,
-      pin: pin,
-      dateOfBirth: dob,
-      dateOfToday: formatTodayBangla(),
-      fatherName: cleanText(extractBetween(text, 'Father Name', 'Mother Name')),
-      motherName: cleanText(extractBetween(text, 'Mother Name', 'Spouse Name')),
-      gender: cleanText(extractBetween(text, 'Gender', 'Marital')),
-      religion: cleanText(extractBetween(text, 'Religion', 'Religion Other')),
-      birthPlace: cleanText(extractBetween(text, 'Birth Place', 'Birth Other')),
-      bloodGroup: cleanText(extractBetween(text, 'Blood Group', 'TIN')),
-      userIMG: userImgBase64,
-      signIMG: signImgBase64,
-      address: combineAddress(text)
-    };
-
-    return res.status(200).json({
-      code: 200,
-      success: true,
-      message: 'Data fetched successfully',
-      data: responseData
-    });
-
-  } catch (error) {
-    return res.status(500).json({
-      code: 500,
-      success: false,
-      message: 'Error processing PDF: ' + error.message
-    });
-  }
-});
-
-module.exports = app;  const month = String(today.getMonth() + 1).padStart(2, '0');
-  const year = today.getFullYear();
-  return convertToBangla(`${day}-${month}-${year}`);
+  return canvas.toBuffer('image/png');
 }
 
-// MAIN API ENDPOINT
+// WEB UI - HTML UPLOAD PAGE (GET /)
+app.get('/', (req, res) => {
+  const html = `
+  <!DOCTYPE html>
+  <html lang="bn">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NID PDF Data Extractor</title>
+    <style>
+      body { font-family: Arial, sans-serif; background: #f4f6f9; padding: 20px; text-align: center; }
+      .container { max-width: 600px; background: #fff; padding: 25px; margin: auto; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
+      h2 { color: #333; margin-bottom: 20px; }
+      input[type="file"] { margin: 15px 0; padding: 10px; width: 100%; border: 1px solid #ccc; border-radius: 5px; box-sizing: border-box; }
+      button { background: #0070f3; color: white; border: none; padding: 12px 20px; font-size: 16px; border-radius: 5px; cursor: pointer; width: 100%; }
+      button:hover { background: #0051a2; }
+      #result { margin-top: 25px; text-align: left; display: none; }
+      .img-box { display: flex; gap: 15px; margin-top: 15px; }
+      .img-box div { text-align: center; }
+      .img-box img { max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 5px; padding: 5px; background: #fafafa; }
+      pre { background: #222; color: #00ffcc; padding: 15px; border-radius: 5px; overflow-x: auto; font-size: 13px; }
+      .loading { color: #ff9800; font-weight: bold; margin-top: 15px; display: none; }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h2>NID PDF Extraction System</h2>
+      <form id="uploadForm">
+        <input type="file" id="pdfFile" name="pdf" accept="application/pdf" required />
+        <button type="submit">ডাটা এক্সট্র্যাক্ট করুন</button>
+      </form>
+      <div id="loading" class="loading">প্রসেসিং হচ্ছে, অনুগ্রহ করে অপেক্ষা করুন...</div>
+      
+      <div id="result">
+        <h3>এক্সট্র্যাক্ট করা ছবি:</h3>
+        <div class="img-box">
+          <div>
+            <p><b>User Photo</b></p>
+            <img id="userImg" src="" alt="User Photo">
+          </div>
+          <div>
+            <p><b>Signature</b></p>
+            <img id="signImg" src="" alt="Signature">
+          </div>
+        </div>
+
+        <h3>এক্সট্র্যাক্ট করা ডাটা (JSON):</h3>
+        <pre id="jsonOutput"></pre>
+      </div>
+    </div>
+
+    <script>
+      document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const fileInput = document.getElementById('pdfFile');
+        if (!fileInput.files[0]) return alert('দয়া করে একটি PDF ফাইল সিলেক্ট করুন');
+
+        const formData = new FormData();
+        formData.append('pdf', fileInput.files[0]);
+
+        document.getElementById('loading').style.display = 'block';
+        document.getElementById('result').style.display = 'none';
+
+        try {
+          const res = await fetch('/', { method: 'POST', body: formData });
+          const data = await res.json();
+          
+          document.getElementById('loading').style.display = 'none';
+          
+          if (data.success) {
+            document.getElementById('result').style.display = 'block';
+            document.getElementById('userImg').src = data.data.userIMG || '';
+            document.getElementById('signImg').src = data.data.signIMG || '';
+            document.getElementById('jsonOutput').textContent = JSON.stringify(data, null, 2);
+          } else {
+            alert('Error: ' + data.message);
+          }
+        } catch (err) {
+          document.getElementById('loading').style.display = 'none';
+          alert('সার্ভারে সমস্যা হয়েছে: ' + err.message);
+        }
+      });
+    </script>
+  </body>
+  </html>
+  `;
+  res.send(html);
+});
+
+// MAIN API POST ENDPOINT
 app.post('/', upload.single('pdf'), async (req, res) => {
   try {
     if (!req.file || req.file.mimetype !== 'application/pdf') {
@@ -243,50 +242,47 @@ app.post('/', upload.single('pdf'), async (req, res) => {
     const dobRaw = cleanText(extractBetween(text, 'Date of Birth', 'Birth Place'));
     const dob = formatDateOfBirth(dobRaw);
 
-    // 2. High Resolution Image Rendering (Page 1)
+    // 2. High Resolution Image Rendering & Cropping
     let userImgBase64 = '';
     let signImgBase64 = '';
 
     try {
-      const outputImages = await pdfImgConvert.convert(pdfBuffer, { page_numbers: [1], scale: 2.0 });
-      if (outputImages && outputImages.length > 0) {
-        const page1Buffer = Buffer.from(outputImages[0]);
-        const imagePipeline = sharp(page1Buffer);
-        const metadata = await imagePipeline.metadata();
+      const page1Buffer = await renderPdfPageToBuffer(pdfBuffer);
+      const metadata = await sharp(page1Buffer).metadata();
 
-        const w = metadata.width;
-        const h = metadata.height;
+      const w = metadata.width;
+      const h = metadata.height;
 
-        // User Image Crop Logic
-        const userCropRect = {
-          left: Math.floor(w * 0.60),
-          top: Math.floor(h * 0.005),
-          width: Math.floor(w * 0.36),
-          height: Math.floor(h * 0.22)
-        };
+      // User Image Crop Logic
+      const userCropRect = {
+        left: Math.floor(w * 0.60),
+        top: Math.floor(h * 0.005),
+        width: Math.floor(w * 0.36),
+        height: Math.floor(h * 0.22)
+      };
 
-        const croppedUser = await sharp(page1Buffer)
-          .extract(userCropRect)
-          .png()
-          .toBuffer();
-        userImgBase64 = `data:image/png;base64,${croppedUser.toString('base64')}`;
+      const croppedUser = await sharp(page1Buffer)
+        .extract(userCropRect)
+        .png()
+        .toBuffer();
+      userImgBase64 = `data:image/png;base64,${croppedUser.toString('base64')}`;
 
-        // Signature Crop & Auto-trim Background Logic
-        const signCropRect = {
-          left: Math.floor(w * 0.05),
-          top: Math.floor(h * 0.25),
-          width: Math.floor(w * 0.63),
-          height: Math.floor(h * 0.05)
-        };
+      // Signature Crop & Auto-trim Background Logic
+      const signCropRect = {
+        left: Math.floor(w * 0.05),
+        top: Math.floor(h * 0.25),
+        width: Math.floor(w * 0.63),
+        height: Math.floor(h * 0.05)
+      };
 
-        const croppedSign = await sharp(page1Buffer)
-          .extract(signCropRect)
-          .threshold(160) // Clean signature background
-          .trim()        // Trim surrounding empty white space
-          .png()
-          .toBuffer();
-        signImgBase64 = `data:image/png;base64,${croppedSign.toString('base64')}`;
-      }
+      const croppedSign = await sharp(page1Buffer)
+        .extract(signCropRect)
+        .threshold(160)
+        .trim()
+        .png()
+        .toBuffer();
+      signImgBase64 = `data:image/png;base64,${croppedSign.toString('base64')}`;
+
     } catch (imgError) {
       console.error('Image Extraction Error:', imgError);
     }
