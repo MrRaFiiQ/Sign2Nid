@@ -1,14 +1,14 @@
 const express = require('express');
 const multer = require('multer');
 const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
+
+// Vercel Serverless-এ pdf.worker.js বান্ডেল নিশ্চিত করার জন্য
+require('pdfjs-dist/legacy/build/pdf.worker.js');
+pdfjsLib.GlobalWorkerOptions.workerSrc = require.resolve('pdfjs-dist/legacy/build/pdf.worker.js');
+
 const { createCanvas } = require('@napi-rs/canvas');
 const sharp = require('sharp');
 const cors = require('cors');
-
-// Disable PDF.js Worker requirement for Vercel Serverless Environment
-if (pdfjsLib.GlobalWorkerOptions) {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = '';
-}
 
 const app = express();
 app.use(cors());
@@ -216,7 +216,6 @@ async function extractImages(pdfBuffer) {
       const h = metadata.height;
 
       if (!userIMG) {
-        // EC Server Copy Photo Location (Top Left Area)
         const croppedUser = await sharp(pageBuffer)
           .extract({
             left: Math.floor(w * 0.02),
@@ -230,7 +229,6 @@ async function extractImages(pdfBuffer) {
       }
 
       if (!signIMG) {
-        // EC Server Copy Signature Location (Top Right / Under Name Area)
         const croppedSign = await sharp(pageBuffer)
           .extract({
             left: Math.floor(w * 0.65),
