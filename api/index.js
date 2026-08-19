@@ -20,19 +20,37 @@ function cleanText(text) {
   if (!text) return '';
   return text
     .normalize('NFC')
-    .replace(/[\0\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
-    .replace(/["\r\n\t|]/g, ' ')
+    .replace(/[\0\r\n\t]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
-// Precise Key-Value Extractor for NID PDFs
-function getFieldValue(text, fieldName) {
+// Ultra Robust Key-Value Extractor (Regex + Line-by-Line Search)
+function getValue(text, key) {
   if (!text) return '';
-  const escapedField = fieldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const regex = new RegExp(`${escapedField}[\\s\\r\\n]*\\|[\\s\\r\\n]*([^|\\r\\n]+)`, 'i');
+  
+  // Method 1: Flexible Regex match
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const regex = new RegExp(`${escapedKey}\\s*(?:\\r?\\n)?\\s*\\|\\s*([^\\r\\n|]+)`, 'i');
   const match = text.match(regex);
-  return match ? cleanText(match[1]) : '';
+  if (match && match[1] && match[1].trim()) {
+    return cleanText(match[1]);
+  }
+
+  // Method 2: Line-by-Line Fallback Search
+  const lines = text.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].toLowerCase().includes(key.toLowerCase())) {
+      if (lines[i].includes('|')) {
+        const val = lines[i].split('|')[1];
+        if (val && val.trim()) return cleanText(val);
+      } else if (i + 1 < lines.length && lines[i + 1].includes('|')) {
+        const val = lines[i + 1].split('|')[1];
+        if (val && val.trim()) return cleanText(val);
+      }
+    }
+  }
+  return '';
 }
 
 function convertToBangla(numberStr) {
@@ -45,7 +63,7 @@ function convertToBangla(numberStr) {
 function formatDateOfBirth(dobRaw) {
   if (!dobRaw) return '';
   const dateObj = new Date(dobRaw);
-  if (isNaN(dateObj.getTime())) return '';
+  if (isNaN(dateObj.getTime())) return dobRaw;
   const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const day = String(dateObj.getDate()).padStart(2, '0');
   const month = months[dateObj.getMonth()];
@@ -62,31 +80,24 @@ function formatTodayBangla() {
 }
 
 function combineAddress(text) {
-  let home = getFieldValue(text, 'Home/Holding');
-  if (!home) home = getFieldValue(text, 'Home/Holding No');
-
-  let village = getFieldValue(text, 'Additional\nVillage/Road');
-  if (!village) village = getFieldValue(text, 'Village/Road');
-
-  let postOffice = getFieldValue(text, 'Post Office');
-  let postalCode = getFieldValue(text, 'Postal Code');
-  if (!postalCode) postalCode = '১৩২৪';
-  let postalCodeBangla = convertToBangla(postalCode);
-
-  let upozila = getFieldValue(text, 'Upozila');
-  let district = getFieldValue(text, 'District');
+  let home = getValue(text, 'Home/Holding No') || getValue(text, 'Home/Holding');
+  let village = getValue(text, 'Additional Village/Road') || getValue(text, 'Village/Road') || getValue(text, 'Additional Mouza/Moholla');
+  let postOffice = getValue(text, 'Post Office');
+  let postalCode = getValue(text, 'Postal Code') || '1324';
+  let upozila = getValue(text, 'Upozila');
+  let district = getValue(text, 'District');
 
   let parts = [];
   if (home) parts.push('বাসা/হোল্ডিং: ' + home);
   if (village) parts.push('গ্রাম/রাস্তা: ' + village);
-  if (postOffice) parts.push('ডাকঘর: ' + postOffice + ' -' + postalCodeBangla);
+  if (postOffice) parts.push('ডাকঘর: ' + postOffice + (postalCode ? ' -' + convertToBangla(postalCode) : ''));
   if (upozila) parts.push(upozila);
   if (district) parts.push(district);
 
   return parts.join(', ');
 }
 
-// Fast Embedded Image Extractor
+// Fast Embedded Image Extractor (Lower threshold for small signatures)
 function extractJpegsFromBuffer(buffer) {
   const jpegs = [];
   const soi = Buffer.from([0xFF, 0xD8, 0xFF]);
@@ -100,7 +111,7 @@ function extractJpegsFromBuffer(buffer) {
     if (end === -1) break;
 
     const jpegBuffer = buffer.subarray(start, end + 2);
-    if (jpegBuffer.length > 2000) {
+    if (jpegBuffer.length > 300) { // Reduced threshold to catch small signature bytes
       jpegs.push(jpegBuffer);
     }
     offset = end + 2;
@@ -245,22 +256,21 @@ app.post('/', upload.single('pdf'), async (req, res) => {
 
     const pdfBuffer = req.file.buffer;
 
-    // 1. Text Parsing using Key-Value matching
+    // 1. Text Parsing
     const parsedPdf = await pdfParse(pdfBuffer);
     const text = parsedPdf.text;
 
-    const nameBangla = getFieldValue(text, 'Name(Bangla)');
-    const nameEnglish = getFieldValue(text, 'Name(English)').toUpperCase();
-    const nid = getFieldValue(text, 'National ID');
-    const pin = getFieldValue(text, 'Pin');
-    const dobRaw = getFieldValue(text, 'Date of Birth');
+    const nameBangla = getValue(text, 'Name(Bangla)');
+    const nameEnglish = getValue(text, 'Name(English)').toUpperCase();
+    const nid = getValue(text, 'National ID');
+    const pin = getValue(text, 'Pin');
+    const dobRaw = getValue(text, 'Date of Birth');
     const dob = formatDateOfBirth(dobRaw);
 
-    // 2. Extract User Photo and Canvas Signature
+    // 2. Extract Embedded Images
     let userImgBase64 = '';
     let signImgBase64 = '';
 
-    // Step A: Extract Embedded User Photo
     const extractedJpegs = extractJpegsFromBuffer(pdfBuffer);
     if (extractedJpegs.length > 0) {
       userImgBase64 = `data:image/jpeg;base64,${extractedJpegs[0].toString('base64')}`;
@@ -269,44 +279,44 @@ app.post('/', upload.single('pdf'), async (req, res) => {
       signImgBase64 = `data:image/jpeg;base64,${extractedJpegs[1].toString('base64')}`;
     }
 
-    // Step B: Canvas Fallback & Signature Crop from Page Render
-    try {
-      const page1Buffer = await renderPdfPageToBuffer(pdfBuffer);
-      const metadata = await sharp(page1Buffer).metadata();
-      const w = metadata.width;
-      const h = metadata.height;
+    // 3. Fallback Canvas Rendering
+    if (!userImgBase64 || !signImgBase64) {
+      try {
+        const page1Buffer = await renderPdfPageToBuffer(pdfBuffer);
+        const metadata = await sharp(page1Buffer).metadata();
+        const w = metadata.width;
+        const h = metadata.height;
 
-      if (!userImgBase64) {
-        const userCropRect = {
-          left: Math.floor(w * 0.60),
-          top: Math.floor(h * 0.005),
-          width: Math.floor(w * 0.36),
-          height: Math.floor(h * 0.22)
-        };
-        const croppedUser = await sharp(page1Buffer).extract(userCropRect).png().toBuffer();
-        userImgBase64 = `data:image/png;base64,${croppedUser.toString('base64')}`;
-      }
+        if (!userImgBase64) {
+          const userCropRect = {
+            left: Math.floor(w * 0.60),
+            top: Math.floor(h * 0.005),
+            width: Math.floor(w * 0.36),
+            height: Math.floor(h * 0.22)
+          };
+          const croppedUser = await sharp(page1Buffer).extract(userCropRect).png().toBuffer();
+          userImgBase64 = `data:image/png;base64,${croppedUser.toString('base64')}`;
+        }
 
-      if (!signImgBase64) {
-        const signCropRect = {
-          left: Math.floor(w * 0.05),
-          top: Math.floor(h * 0.24),
-          width: Math.floor(w * 0.55),
-          height: Math.floor(h * 0.07)
-        };
-        const croppedSign = await sharp(page1Buffer)
-          .extract(signCropRect)
-          .threshold(180)
-          .trim()
-          .png()
-          .toBuffer();
-        signImgBase64 = `data:image/png;base64,${croppedSign.toString('base64')}`;
+        if (!signImgBase64) {
+          const signCropRect = {
+            left: Math.floor(w * 0.05),
+            top: Math.floor(h * 0.23),
+            width: Math.floor(w * 0.50),
+            height: Math.floor(h * 0.08)
+          };
+          const croppedSign = await sharp(page1Buffer)
+            .extract(signCropRect)
+            .png()
+            .toBuffer();
+          signImgBase64 = `data:image/png;base64,${croppedSign.toString('base64')}`;
+        }
+      } catch (imgError) {
+        console.error('Canvas Crop Error:', imgError);
       }
-    } catch (imgError) {
-      console.error('Canvas Crop Handling Error:', imgError);
     }
 
-    // Response Object Structure
+    // Response Structure
     const responseData = {
       nameBangla: nameBangla,
       nameEnglish: nameEnglish,
@@ -314,12 +324,12 @@ app.post('/', upload.single('pdf'), async (req, res) => {
       pin: pin,
       dateOfBirth: dob,
       dateOfToday: formatTodayBangla(),
-      fatherName: getFieldValue(text, 'Father Name'),
-      motherName: getFieldValue(text, 'Mother Name'),
-      gender: getFieldValue(text, 'Gender'),
-      religion: getFieldValue(text, 'Religion'),
-      birthPlace: getFieldValue(text, 'Birth Place'),
-      bloodGroup: getFieldValue(text, 'Blood Group'),
+      fatherName: getValue(text, 'Father Name'),
+      motherName: getValue(text, 'Mother Name'),
+      gender: getValue(text, 'Gender'),
+      religion: getValue(text, 'Religion'),
+      birthPlace: getValue(text, 'Birth Place'),
+      bloodGroup: getValue(text, 'Blood Group'),
       userIMG: userImgBase64,
       signIMG: signImgBase64,
       address: combineAddress(text)
