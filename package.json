@@ -2,16 +2,8 @@
   "name": "nid-pdf-extractor",
   "version": "1.0.0",
   "private": true,
-  "main": "api/index.js",
-  "scripts": {
-    "start": "node api/index.js"
-  },
   "dependencies": {
-    "@napi-rs/canvas": "0.1.77",
-    "cors": "2.8.5",
-    "express": "4.21.2",
-    "multer": "1.4.5-lts.1",
-    "pdfjs-dist": "3.11.174",
-    "sharp": "0.33.5"
+    "formidable": "^3.5.1",
+    "pdf-parse": "^1.1.1"
   }
 }
