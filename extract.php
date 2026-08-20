@@ -6,7 +6,8 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     exit;
 }
 
-if (!isset($_FILES['nid_pdf']) || $_FILES['nid_pdf']['error'] !== UPLOAD_ERR_OK) {
+$fileKey = isset($_FILES['nid_pdf']) ? 'nid_pdf' : 'pdf';
+if (!isset($_FILES[$fileKey]) || $_FILES[$fileKey]['error'] !== UPLOAD_ERR_OK) {
     echo json_encode(["code" => 400, "message" => "No PDF file uploaded"]);
     exit;
 }
@@ -16,12 +17,12 @@ $uploadDir = sys_get_temp_dir() . '/nid_extract_' . uniqid();
 mkdir($uploadDir);
 
 $pdfPath = $uploadDir . '/uploaded.pdf';
-move_uploaded_file($_FILES['nid_pdf']['tmp_name'], $pdfPath);
+move_uploaded_file($_FILES[$fileKey]['tmp_name'], $pdfPath);
 
 // ১. টেক্সট এক্সট্রাক্ট করা
 $textPath = $uploadDir . '/text.txt';
-exec("pdftotext " . escapeshellarg($pdfPath) . " " . escapeshellarg($textPath));
-$lines = file_exists($textPath) ? file($textPath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) : [];
+exec("pdftotext -layout " . escapeshellarg($pdfPath) . " " . escapeshellarg($textPath));
+$text = file_exists($textPath) ? file_get_contents($textPath) : "";
 
 // ২. ছবি ও সিগনেচার এক্সট্রাক্ট করা
 exec("pdfimages -all " . escapeshellarg($pdfPath) . " " . escapeshellarg($uploadDir . '/img'));
@@ -40,78 +41,139 @@ if (count($images) > 0) {
     }
 }
 
-// ৩. লাইন বাই লাইন পার্স করে নির্ভুলভাবে ডাটা খোঁজার ফাংশন
-function findValueByLabel($searchLabel, $lines) {
-    for ($i = 0; $i < count($lines); $i++) {
-        // লেবেল মিলে গেলে
-        if (mb_stripos($lines[$i], $searchLabel) !== false) {
-            $currentLine = trim($lines[$i]);
-            // একই লাইনে পাইপ থাকলে তার পরের অংশ চেক করি
-            if (strpos($currentLine, '|') !== false) {
-                $parts = explode('|', $currentLine);
-                if (isset($parts[1]) && trim($parts[1]) !== '' && mb_stripos(trim($parts[1]), $searchLabel) === false) {
-                    return trim($parts[1]);
-                }
-            }
-            // অথবা পরবর্তী ১ থেকে ৩ লাইনের মধ্যে মানটি থাকতে পারে
-            for ($j = $i + 1; $j <= $i + 3 && $j < count($lines); $j++) {
-                $nextLine = trim($lines[$j]);
-                if ($nextLine !== '' && $nextLine !== '|') {
-                    if (strpos($nextLine, '|') !== false) {
-                        $valParts = explode('|', $nextLine);
-                        if (isset($valParts[1]) && trim($valParts[1]) !== '') {
-                            return trim($valParts[1]);
-                        }
-                    } else {
-                        return $nextLine;
-                    }
-                }
-            }
-        }
+// ============================================================
+// ADDRESS & TEXT HELPER FUNCTIONS
+// ============================================================
+
+function extractBetween($text, $start, $end) {
+    $pattern = '/' . preg_quote($start, '/') . '[\s\|:]+(.*?)(?=' . preg_quote($end, '/') . '|$)/uis';
+    if (preg_match($pattern, $text, $matches)) {
+        return trim($matches[1]);
+    }
+    return '';
+}
+
+function cleanText($text) {
+    $text = preg_replace('/[\|\r\n]+/u', ' ', $text);
+    $text = preg_replace('/\s+/', ' ', $text);
+    $text = str_ireplace(['Village/Road', 'Home/Holding', 'Additional', 'No.', 'No', 'Post Office', 'Postal Code', 'Upozila', 'District', 'Union/Ward', 'Municipality'], '', $text);
+    return trim($text);
+}
+
+function extractPostalCode($text) {
+    $raw = extractBetween($text, 'Postal Code', 'Region');
+    if(!$raw) $raw = extractBetween($text, 'Postal Code', 'Upozila');
+    preg_match('/([0-9]{4})/u', $raw, $m);
+    return isset($m[1]) ? $m[1] : '';
+}
+
+function convertToBangla($number) {
+    $en = ['0','1','2','3','4','5','6','7','8','9'];
+    $bn = ['০','১','২','৩','৪','৫','৬','৭','৮','৯'];
+    return str_replace($en, $bn, $number);
+}
+
+function findValueByLabel($searchLabel, $text) {
+    $pattern = '/' . preg_quote($searchLabel, '/') . '[\s\|:]+([^\r\n\|]+)/ui';
+    if (preg_match($pattern, $text, $matches)) {
+        return trim($matches[1]);
     }
     return "";
 }
 
-// ডাইনামিক ফিল্ড এক্সট্রাকশন
-$nameBangla = findValueByLabel('Name(Bangla)', $lines);
-if(!$nameBangla) $nameBangla = findValueByLabel('Name (Bangla)', $lines);
+// =======================================================
+// COMBINE ADDRESS LOGIC
+// ============================================================
 
-$nameEnglish = findValueByLabel('Name(English)', $lines);
-if(!$nameEnglish) $nameEnglish = findValueByLabel('Name (English)', $lines);
+function combineAddress($text) {
+    $villageRaw = extractBetween($text, 'Village/Road', 'Home/Holding');
+    if (!$villageRaw) {
+        $villageRaw = extractBetween($text, 'Village/Road', 'Post Office');
+    }
 
-$fatherName = findValueByLabel('Father Name', $lines);
-$motherName = findValueByLabel('Mother Name', $lines);
-$birthPlace = findValueByLabel('Birth Place', $lines);
-$bloodGroup = findValueByLabel('Blood Group', $lines);
-$gender = findValueByLabel('Gender', $lines);
-$religion = findValueByLabel('Religion', $lines);
+    $village = str_ireplace(['Village/Road', 'Home/Holding', 'Additional', 'No.', 'No'], '', $villageRaw);
+    $village = cleanText($village);
 
-$nationalId = findValueByLabel('National ID', $lines);
+    $homeRaw = extractBetween($text, 'Home/Holding', 'Post Office');
+    if (!$homeRaw) {
+        $homeRaw = extractBetween($text, 'Home/Holding', 'Postal Code');
+    }
+
+    $home = str_ireplace(['Home/Holding', 'Village/Road', 'Additional', 'No.', 'No'], '', $homeRaw);
+    $home = cleanText($home);
+
+    $postOffice = cleanText(extractBetween($text, 'Post Office', 'Postal Code'));
+    $postalCode = extractPostalCode($text);
+    $postalCodeBangla = convertToBangla($postalCode);
+
+    $upozila = cleanText(extractBetween($text, 'Upozila', 'Union'));
+    if (!$upozila) {
+        $upozila = cleanText(extractBetween($text, 'Upozila', 'Municipality'));
+    }
+
+    $district = cleanText(extractBetween($text, 'District', 'RMO'));
+    if (!$district) {
+        $district = cleanText(extractBetween($text, 'District', 'City'));
+    }
+
+    $parts = [];
+
+    if (!empty($home) && $home !== 'Additional') {
+        $parts[] = 'বাসা/হোল্ডিং: ' . $home;
+    }
+
+    if (!empty($village) && $village !== 'Additional') {
+        $parts[] = 'গ্রাম/রাস্তা: ' . $village;
+    }
+
+    if (!empty($postOffice)) {
+        $postOfficeClean = str_ireplace(['Post Office', 'Postal Code'], '', $postOffice);
+        $parts[] = 'ডাকঘর: ' . trim($postOfficeClean) . ($postalCodeBangla ? ' - ' . $postalCodeBangla : '');
+    }
+
+    if (!empty($upozila)) {
+        $parts[] = $upozila;
+    }
+
+    if (!empty($district) && $district !== 'RMO') {
+        $parts[] = $district;
+    }
+
+    return implode(', ', $parts);
+}
+
+// ৩. ডাটা এক্সট্রাকশন
+$nameBangla = findValueByLabel('Name(Bangla)', $text);
+if(!$nameBangla) $nameBangla = findValueByLabel('Name (Bangla)', $text);
+
+$nameEnglish = findValueByLabel('Name(English)', $text);
+if(!$nameEnglish) $nameEnglish = findValueByLabel('Name (English)', $text);
+
+$fatherName = findValueByLabel('Father Name', $text);
+$motherName = findValueByLabel('Mother Name', $text);
+$birthPlace = findValueByLabel('Birth Place', $text);
+
+// ব্লাড গ্রুপে TIN আসা রোধ করার জন্য ভ্যালিডেশন
+$bloodGroupRaw = findValueByLabel('Blood Group', $text);
+if (preg_match('/^(A|B|AB|O)[+-]$/ui', trim($bloodGroupRaw), $match)) {
+    $bloodGroup = strtoupper($match[0]);
+} else {
+    $bloodGroup = ""; 
+}
+
+$gender = findValueByLabel('Gender', $text);
+$religion = findValueByLabel('Religion', $text);
+
+$nationalId = findValueByLabel('National ID', $text);
 $nationalId = str_replace(' ', '', $nationalId);
 
-$pin = findValueByLabel('Pin', $lines);
+$pin = findValueByLabel('Pin', $text);
 $pin = str_replace(' ', '', $pin);
 
-$dateOfBirth = findValueByLabel('Date of Birth', $lines);
+$dateOfBirth = findValueByLabel('Date of Birth', $text);
 
-// ঠিকানার অংশগুলো সঠিকভাবে সংগ্রহ করা
-$holding = findValueByLabel('Home/Holding No', $lines);
-$village = findValueByLabel('Additional Village/Road', $lines);
-if(!$village) $village = findValueByLabel('Village/Road', $lines);
-$postOffice = findValueByLabel('Post Office', $lines);
-$postalCode = findValueByLabel('Postal Code', $lines);
-$upozila = findValueByLabel('Upozila', $lines);
-$district = findValueByLabel('District', $lines);
-
-$addressParts = [];
-if($holding) $addressParts[] = "বাসা/হোল্ডিং: " . $holding;
-if($village) $addressParts[] = "গ্রাম/রাস্তা: " . $village;
-if($postOffice) $addressParts[] = "ডাকঘর: " . $postOffice;
-if($postalCode) $addressParts[] = "পোস্ট কোড: " . $postalCode;
-if($upozila) $addressParts[] = "উপজেলা: " . $upozila;
-if($district && mb_stripos($district, 'RMO') === false) $addressParts[] = "জেলা: " . $district;
-
-$address = implode(', ', $addressParts);
+// ঠিকানা কম্বাইন ফাংশন কল
+$address = combineAddress($text);
 
 // আজকের বাংলা তারিখ তৈরি
 $en = ['0','1','2','3','4','5','6','7','8','9'];
@@ -131,8 +193,8 @@ $response = [
         "dateOfToday" => $dateOfToday,
         "fatherName" => $fatherName,
         "motherName" => $motherName,
-        "gender" => $gender ?: "male",
-        "religion" => $religion ?: "Islam",
+        "gender" => $gender,
+        "religion" => $religion,
         "birthPlace" => $birthPlace,
         "bloodGroup" => $bloodGroup,
         "userIMG" => $userIMG,
@@ -141,7 +203,7 @@ $response = [
     ]
 ];
 
-echo json_encode($response, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+echo json_encode($response, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
 
 // টেম্পোরারি ফাইল ক্লিনআপ
 array_map('unlink', glob("$uploadDir/*.*"));
