@@ -1,41 +1,52 @@
 <?php
+// পিএইচপির যেকোনো ওয়ার্নিং বা নোটিশ জেসনে আসা রোধ করতে এটি ব্যবহার করা হয়েছে
+error_reporting(0);
+ini_set('display_errors', '0');
+ob_start();
+
 header('Content-Type: application/json; charset=utf-8');
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    ob_clean();
     echo json_encode(["code" => 405, "message" => "Method Not Allowed"]);
     exit;
 }
 
 $fileKey = isset($_FILES['nid_pdf']) ? 'nid_pdf' : 'pdf';
 if (!isset($_FILES[$fileKey]) || $_FILES[$fileKey]['error'] !== UPLOAD_ERR_OK) {
-    echo json_encode(["code" => 400, "message" => "No file uploaded or upload error occurred."], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    ob_clean();
+    echo json_encode([
+        'code' => 400,
+        'success' => false,
+        'message' => 'No file uploaded or upload error occurred.'
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit;
 }
 
 // ইউনিক টেম্পোরারি ডিরেক্টরি তৈরি
 $uploadDir = sys_get_temp_dir() . '/nid_extract_' . uniqid();
-mkdir($uploadDir);
+@mkdir($uploadDir, 0755, true);
 
 $pdfPath = $uploadDir . '/uploaded.pdf';
-move_uploaded_file($_FILES[$fileKey]['tmp_name'], $pdfPath);
+@move_uploaded_file($_FILES[$fileKey]['tmp_name'], $pdfPath);
 
 // ১. টেক্সট এক্সট্রাক্ট করা
 $textPath = $uploadDir . '/text.txt';
-exec("pdftotext -layout " . escapeshellarg($pdfPath) . " " . escapeshellarg($textPath));
+@exec("pdftotext -layout " . escapeshellarg($pdfPath) . " " . escapeshellarg($textPath));
 $text = file_exists($textPath) ? file_get_contents($textPath) : "";
 
 // ২. ছবি ও সিগনেচার এক্সট্রাক্ট করে আলাদা ফোল্ডারে শর্ট লিংক তৈরি করা
 $imgDir = __DIR__ . '/uploads';
 if (!file_exists($imgDir)) {
-    mkdir($imgDir, 0755, true);
+    @mkdir($imgDir, 0755, true);
 }
 
 // প্রটোকল এবং হোস্ট বের করা শর্ট লিংকের জন্য
 $protocol = isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? "https" : "http";
-$host = $_SERVER['HTTP_HOST'];
+$host = isset($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : 'localhost';
 $baseUrl = $protocol . "://$host/uploads/";
 
-exec("pdfimages -all " . escapeshellarg($pdfPath) . " " . escapeshellarg($uploadDir . '/img'));
+@exec("pdfimages -all " . escapeshellarg($pdfPath) . " " . escapeshellarg($uploadDir . '/img'));
 
 $images = glob($uploadDir . '/img-*');
 $userIMG = "";
@@ -45,14 +56,14 @@ if (count($images) > 0) {
     sort($images);
     if (isset($images[0])) {
         $ext = pathinfo($images[0], PATHINFO_EXTENSION);
-        $filename = 'user_' . uniqid() . '.' . $ext;
-        copy($images[0], $imgDir . '/' . $filename);
+        $filename = 'user_' . uniqid() . '.' . ($ext ?: 'png');
+        @copy($images[0], $imgDir . '/' . $filename);
         $userIMG = $baseUrl . $filename;
     }
     if (isset($images[1])) {
         $ext = pathinfo($images[1], PATHINFO_EXTENSION);
-        $filename = 'sign_' . uniqid() . '.' . $ext;
-        copy($images[1], $imgDir . '/' . $filename);
+        $filename = 'sign_' . uniqid() . '.' . ($ext ?: 'png');
+        @copy($images[1], $imgDir . '/' . $filename);
         $signIMG = $baseUrl . $filename;
     }
 }
@@ -72,7 +83,6 @@ function extractBetween($text, $start, $end) {
 function cleanText($text) {
     $text = preg_replace('/[\|\r\n]+/u', ' ', $text);
     $text = preg_replace('/\s+/', ' ', $text);
-    // অতিরিক্ত সিস্টেম লেবেলগুলো ফিল্টার করে বাদ দেওয়া
     $text = str_ireplace([
         'Village/Road', 'Home/Holding', 'Additional', 'No.', 'No', 
         'Post Office', 'Postal Code', 'Upozila', 'District', 
@@ -82,7 +92,6 @@ function cleanText($text) {
     return trim($text);
 }
 
-// নামের শেষ থেকে অতিরিক্ত সিস্টেম টেক্সট (যেমন: Smart Card Info, No Documents Available) কেটে পরিষ্কার করার ফাংশন
 function cleanName($text) {
     $unwanted = [
         'Smart Card Info', 
@@ -100,7 +109,6 @@ function cleanName($text) {
             $text = mb_substr($text, 0, $pos);
         }
     }
-    // পাইপ বা অতিরিক্ত স্পেস ক্লিন করা
     $text = preg_replace('/[\|]+/u', ' ', $text);
     return trim(preg_replace('/\s+/', ' ', $text));
 }
@@ -137,7 +145,6 @@ function combineAddress($text) {
     }
 
     $village = str_ireplace(['Village/Road', 'Home/Holding', 'Additional', 'No.', 'No', 'Union/Ward'], '', $villageRaw);
-    // যদি গ্রামের নামের ভেতর ইউনিয়ন বা অন্য কিছু চলে আসে তা কেটে ফেলা
     $partsVillage = explode('Union', $village);
     $village = cleanText($partsVillage[0]);
 
@@ -201,7 +208,6 @@ $fatherName = findValueByLabel('Father Name', $text);
 $motherName = findValueByLabel('Mother Name', $text);
 $birthPlace = findValueByLabel('Birth Place', $text);
 
-// ব্লাড গ্রুপে TIN আসা রোধ করার জন্য ভ্যালিডেশন
 $bloodGroupRaw = findValueByLabel('Blood Group', $text);
 if (preg_match('/^(A|B|AB|O)[+-]$/ui', trim($bloodGroupRaw), $match)) {
     $bloodGroup = strtoupper($match[0]);
@@ -220,10 +226,8 @@ $pin = str_replace(' ', '', $pin);
 
 $dateOfBirth = findValueByLabel('Date of Birth', $text);
 
-// ঠিকানা কম্বাইন ফাংশন কল
 $address = combineAddress($text);
 
-// আজকের বাংলা তারিখ তৈরি
 $en = ['0','1','2','3','4','5','6','7','8','9'];
 $bn = ['০','১','২','৩','৪','৫','৬','৭','৮','৯'];
 $dateOfToday = str_replace($en, $bn, date('d-m-Y'));
@@ -241,8 +245,8 @@ $response = [
         "dateOfToday" => $dateOfToday,
         "fatherName" => $fatherName,
         "motherName" => $motherName,
-        "gender" => $gender,
-        "religion" => $religion,
+        "gender" => $gender ?: "male",
+        "religion" => $religion ?: "Islam",
         "birthPlace" => $birthPlace,
         "bloodGroup" => $bloodGroup,
         "userIMG" => $userIMG,
@@ -251,18 +255,12 @@ $response = [
     ]
 ];
 
+// সমস্ত এক্সট্রা আউটপুট মুছে পরিষ্কার শুধু জেসন প্রিন্ট করা
+ob_clean();
 echo json_encode($response, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+ob_end_flush();
 
-// টেম্পোরারি ফাইল ক্লিনআপ (আপলোড করা ছবিগুলো /uploads ফোল্ডারে সংরক্ষিত থাকবে শর্ট লিংকের জন্য)
-array_map('unlink', glob("$uploadDir/*.*"));
-rmdir($uploadDir);
-?>        "address" => $address
-    ]
-];
-
-echo json_encode($response, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
-
-// টেম্পোরারি ফাইল ক্লিনআপ (আপলোড করা ছবিগুলো /uploads ফোল্ডারে সংরক্ষিত থাকবে শর্ট লিংকের জন্য)
-array_map('unlink', glob("$uploadDir/*.*"));
-rmdir($uploadDir);
+// টেম্পোরারি ফাইল ক্লিনআপ
+@array_map('unlink', glob("$uploadDir/*.*"));
+@rmdir($uploadDir);
 ?>
