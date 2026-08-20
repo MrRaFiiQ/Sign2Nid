@@ -1,9 +1,48 @@
+# Composer
 /vendor/
-/uploads/*
-/images/*
 
+# Uploaded PDFs
+*.pdf
+*.PDF
+
+/uploads/*
 !/uploads/.gitkeep
+
+# Generated images
+/images/*
 !/images/.gitkeep
 
+# Temporary
+*.tmp
+*.temp
+*.cache
 *.log
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# OS
 .DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Backup
+*.bak
+*.backup
+*.old
+*~
+
+# Generated extraction files
+raw_*
+page_*
+user_*
+sign_*
+sig_*
