@@ -9,7 +9,10 @@ module.exports = async function handler(req, res) {
 
   try {
     const { files } = await new Promise((resolve, reject) => {
-      const form = formidable({ multiples: false, keepExtensions: true });
+      // formidable v2/v3 কম্প্যাটিবিলিটি ফিক্স
+      const parseForm = typeof formidable === 'function' ? formidable : formidable.formidable;
+      const form = parseForm({ multiples: false, keepExtensions: true });
+      
       form.parse(req, (err, fields, files) => {
         if (err) reject(err);
         else resolve({ fields, files });
@@ -25,11 +28,11 @@ module.exports = async function handler(req, res) {
 
     const dataBuffer = fs.readFileSync(rawFile.filepath);
     
-    // ১. PDF টেক্সট পার্স করা (Vercel Fix)
+    // ১. PDF টেক্সট পার্স করা
     const pdfData = await pdfParse(dataBuffer);
     const text = pdfData.text || '';
 
-    // ২. PDF থেকে JPEG ইমেজ স্ট্রিম এক্সট্রাক্ট
+    // ২. PDF থেকে JPEG ইমেজ স্ট্রিম এক্সট্রাক্ট করা
     const extractJpegs = (buffer) => {
       const jpegs = [];
       let start = 0;
