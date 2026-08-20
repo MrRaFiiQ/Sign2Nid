@@ -21,10 +21,7 @@ move_uploaded_file($_FILES['nid_pdf']['tmp_name'], $pdfPath);
 // ১. টেক্সট এক্সট্রাক্ট করা
 $textPath = $uploadDir . '/text.txt';
 exec("pdftotext " . escapeshellarg($pdfPath) . " " . escapeshellarg($textPath));
-$text = file_exists($textPath) ? file_get_contents($textPath) : "";
-
-// সমস্ত নতুন লাইন এবং অতিরিক্ত স্পেসকে একটি সিঙ্গেল স্পেসে রূপান্তর করে টেক্সট ফ্লাট করা
-$flatText = preg_replace('/\s+/', ' ', $text);
+$lines = file_exists($textPath) ? file($textPath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) : [];
 
 // ২. ছবি ও সিগনেচার এক্সট্রাক্ট করা
 exec("pdfimages -all " . escapeshellarg($pdfPath) . " " . escapeshellarg($uploadDir . '/img'));
@@ -43,44 +40,68 @@ if (count($images) > 0) {
     }
 }
 
-// ৩. নিরাপদ ও নির্ভুল ফিল্ড এক্সট্রাকশন ফাংশন
-function extractFlatField($label, $text) {
-    // এখানে সরাসরি পরিষ্কার লেবেল পাঠানো হবে, preg_quote নিজে থেকেই সব স্পেশাল চরিত্র সুরক্ষিত করবে
-    $pattern = '/' . preg_quote($label, '/') . '\s*\|\s*([^\|]+)/ui';
-    if (preg_match($pattern, $text, $matches)) {
-        // অতিরিক্ত ট্রেইলিং লেবেল বা স্পেস কেটে ফেলা
-        $val = preg_replace('/\s+[A-Za-z\(\)]+\s*$/u', '', trim($matches[1]));
-        return trim($val);
+// ৩. লাইন বাই লাইন পার্স করে নির্ভুলভাবে ডাটা খোঁজার ফাংশন
+function findValueByLabel($searchLabel, $lines) {
+    for ($i = 0; $i < count($lines); $i++) {
+        // লেবেল মিলে গেলে
+        if (mb_stripos($lines[$i], $searchLabel) !== false) {
+            $currentLine = trim($lines[$i]);
+            // একই লাইনে পাইপ থাকলে তার পরের অংশ চেক করি
+            if (strpos($currentLine, '|') !== false) {
+                $parts = explode('|', $currentLine);
+                if (isset($parts[1]) && trim($parts[1]) !== '' && mb_stripos(trim($parts[1]), $searchLabel) === false) {
+                    return trim($parts[1]);
+                }
+            }
+            // অথবা পরবর্তী ১ থেকে ৩ লাইনের মধ্যে মানটি থাকতে পারে
+            for ($j = $i + 1; $j <= $i + 3 && $j < count($lines); $j++) {
+                $nextLine = trim($lines[$j]);
+                if ($nextLine !== '' && $nextLine !== '|') {
+                    if (strpos($nextLine, '|') !== false) {
+                        $valParts = explode('|', $nextLine);
+                        if (isset($valParts[1]) && trim($valParts[1]) !== '') {
+                            return trim($valParts[1]);
+                        }
+                    } else {
+                        return $nextLine;
+                    }
+                }
+            }
+        }
     }
     return "";
 }
 
-// ডাইনামিক ফিল্ড এক্সট্রাকশন (কোনো অতিরিক্ত ব্যাকস্লাশ ছাড়া সঠিক লেবেল পাস করা হয়েছে)
-$nameBangla = extractFlatField('Name(Bangla)', $flatText);
-$nameEnglish = extractFlatField('Name(English)', $flatText);
-$fatherName = extractFlatField('Father Name', $flatText);
-$motherName = extractFlatField('Mother Name', $flatText);
-$birthPlace = extractFlatField('Birth Place', $flatText);
-$bloodGroup = extractFlatField('Blood Group', $flatText);
-$gender = extractFlatField('Gender', $flatText);
-$religion = extractFlatField('Religion', $flatText);
+// ডাইনামিক ফিল্ড এক্সট্রাকশন
+$nameBangla = findValueByLabel('Name(Bangla)', $lines);
+if(!$nameBangla) $nameBangla = findValueByLabel('Name (Bangla)', $lines);
 
-$nationalId = extractFlatField('National ID', $flatText);
+$nameEnglish = findValueByLabel('Name(English)', $lines);
+if(!$nameEnglish) $nameEnglish = findValueByLabel('Name (English)', $lines);
+
+$fatherName = findValueByLabel('Father Name', $lines);
+$motherName = findValueByLabel('Mother Name', $lines);
+$birthPlace = findValueByLabel('Birth Place', $lines);
+$bloodGroup = findValueByLabel('Blood Group', $lines);
+$gender = findValueByLabel('Gender', $lines);
+$religion = findValueByLabel('Religion', $lines);
+
+$nationalId = findValueByLabel('National ID', $lines);
 $nationalId = str_replace(' ', '', $nationalId);
 
-$pin = extractFlatField('Pin', $flatText);
+$pin = findValueByLabel('Pin', $lines);
 $pin = str_replace(' ', '', $pin);
 
-$dateOfBirth = extractFlatField('Date of Birth', $flatText);
+$dateOfBirth = findValueByLabel('Date of Birth', $lines);
 
 // ঠিকানার অংশগুলো সঠিকভাবে সংগ্রহ করা
-$holding = extractFlatField('Home/Holding No', $flatText);
-$village = extractFlatField('Additional Village/Road', $flatText);
-if(!$village) $village = extractFlatField('Village/Road', $flatText);
-$postOffice = extractFlatField('Post Office', $flatText);
-$postalCode = extractFlatField('Postal Code', $flatText);
-$upozila = extractFlatField('Upozila', $flatText);
-$district = extractFlatField('District', $flatText);
+$holding = findValueByLabel('Home/Holding No', $lines);
+$village = findValueByLabel('Additional Village/Road', $lines);
+if(!$village) $village = findValueByLabel('Village/Road', $lines);
+$postOffice = findValueByLabel('Post Office', $lines);
+$postalCode = findValueByLabel('Postal Code', $lines);
+$upozila = findValueByLabel('Upozila', $lines);
+$district = findValueByLabel('District', $lines);
 
 $addressParts = [];
 if($holding) $addressParts[] = "বাসা/হোল্ডিং: " . $holding;
@@ -88,7 +109,7 @@ if($village) $addressParts[] = "গ্রাম/রাস্তা: " . $village
 if($postOffice) $addressParts[] = "ডাকঘর: " . $postOffice;
 if($postalCode) $addressParts[] = "পোস্ট কোড: " . $postalCode;
 if($upozila) $addressParts[] = "উপজেলা: " . $upozila;
-if($district && $district !== 'RMO') $addressParts[] = "জেলা: " . $district;
+if($district && mb_stripos($district, 'RMO') === false) $addressParts[] = "জেলা: " . $district;
 
 $address = implode(', ', $addressParts);
 
