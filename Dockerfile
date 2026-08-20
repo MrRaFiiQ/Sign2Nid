@@ -39,9 +39,13 @@ RUN composer install \
 
 COPY . /var/www/html/
 
-# -p থাকলে directory আগে থেকেই থাকলেও error হবে না
-RUN mkdir -p /var/www/html/uploads /var/www/html/images \
-    && chmod -R 777 /var/www/html/uploads /var/www/html/images
+# Remove conflicting files/directories and recreate them
+RUN rm -rf /var/www/html/uploads \
+           /var/www/html/images \
+    && mkdir -p /var/www/html/uploads \
+               /var/www/html/images \
+    && chmod -R 777 /var/www/html/uploads \
+                    /var/www/html/images
 
 RUN echo "ServerName localhost" >> /etc/apache2/apache2.conf
 
