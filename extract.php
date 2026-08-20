@@ -23,7 +23,7 @@ $textPath = $uploadDir . '/text.txt';
 exec("pdftotext " . escapeshellarg($pdfPath) . " " . escapeshellarg($textPath));
 $text = file_exists($textPath) ? file_get_contents($textPath) : "";
 
-// সমস্ত নতুন লাইন এবং অতিরিক্ত স্পেসকে একটি সিঙ্গেল স্পেসে রূপান্তর করে টেক্সট ফ্লাট করা (মূল সমাধান)
+// সমস্ত নতুন লাইন এবং অতিরিক্ত স্পেসকে একটি সিঙ্গেল স্পেসে রূপান্তর করে টেক্সট ফ্লাট করা
 $flatText = preg_replace('/\s+/', ' ', $text);
 
 // ২. ছবি ও সিগনেচার এক্সট্রাক্ট করা
@@ -43,20 +43,21 @@ if (count($images) > 0) {
     }
 }
 
-// ৩. ফ্লাট টেক্সট থেকে সঠিক ডাটা তোলার জন্য নিখুঁত ফাংশন
+// ৩. নিরাপদ ও নির্ভুল ফিল্ড এক্সট্রাকশন ফাংশন
 function extractFlatField($label, $text) {
-    $escapedLabel = preg_quote($label, '/');
-    // লেবেল এবং পাইপের মাঝখানের যেকোনো দূরত্ব অতিক্রম করে পরের মানটুকু নিখুঁতভাবে ক্যাপচার করবে
-    $pattern = '/' . $escapedLabel . '\s*\|\s*([^\|]+)/ui';
+    // এখানে সরাসরি পরিষ্কার লেবেল পাঠানো হবে, preg_quote নিজে থেকেই সব স্পেশাল চরিত্র সুরক্ষিত করবে
+    $pattern = '/' . preg_quote($label, '/') . '\s*\|\s*([^\|]+)/ui';
     if (preg_match($pattern, $text, $matches)) {
-        return trim($matches[1]);
+        // অতিরিক্ত ট্রেইলিং লেবেল বা স্পেস কেটে ফেলা
+        $val = preg_replace('/\s+[A-Za-z\(\)]+\s*$/u', '', trim($matches[1]));
+        return trim($val);
     }
     return "";
 }
 
-// ডাইনামিক ফিল্ড এক্সট্রাকশন
-$nameBangla = extractFlatField('Name\(Bangla\)', $flatText);
-$nameEnglish = extractFlatField('Name\(English\)', $flatText);
+// ডাইনামিক ফিল্ড এক্সট্রাকশন (কোনো অতিরিক্ত ব্যাকস্লাশ ছাড়া সঠিক লেবেল পাস করা হয়েছে)
+$nameBangla = extractFlatField('Name(Bangla)', $flatText);
+$nameEnglish = extractFlatField('Name(English)', $flatText);
 $fatherName = extractFlatField('Father Name', $flatText);
 $motherName = extractFlatField('Mother Name', $flatText);
 $birthPlace = extractFlatField('Birth Place', $flatText);
@@ -73,9 +74,9 @@ $pin = str_replace(' ', '', $pin);
 $dateOfBirth = extractFlatField('Date of Birth', $flatText);
 
 // ঠিকানার অংশগুলো সঠিকভাবে সংগ্রহ করা
-$holding = extractFlatField('Home\/Holding No', $flatText);
-$village = extractFlatField('Additional Village\/Road', $flatText);
-if(!$village) $village = extractFlatField('Village\/Road', $flatText);
+$holding = extractFlatField('Home/Holding No', $flatText);
+$village = extractFlatField('Additional Village/Road', $flatText);
+if(!$village) $village = extractFlatField('Village/Road', $flatText);
 $postOffice = extractFlatField('Post Office', $flatText);
 $postalCode = extractFlatField('Postal Code', $flatText);
 $upozila = extractFlatField('Upozila', $flatText);
@@ -87,7 +88,7 @@ if($village) $addressParts[] = "গ্রাম/রাস্তা: " . $village
 if($postOffice) $addressParts[] = "ডাকঘর: " . $postOffice;
 if($postalCode) $addressParts[] = "পোস্ট কোড: " . $postalCode;
 if($upozila) $addressParts[] = "উপজেলা: " . $upozila;
-if($district) $addressParts[] = "জেলা: " . $district;
+if($district && $district !== 'RMO') $addressParts[] = "জেলা: " . $district;
 
 $address = implode(', ', $addressParts);
 
