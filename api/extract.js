@@ -1,4 +1,4 @@
-const pdfParse = require('pdf-parse');
+const pdfParse = require('pdf-parse/lib/pdf-parse.js');
 const formidable = require('formidable');
 const fs = require('fs');
 
@@ -8,7 +8,6 @@ module.exports = async function handler(req, res) {
   }
 
   try {
-    // Vercel Serverless-এর জন্য Promise Wrapping
     const { files } = await new Promise((resolve, reject) => {
       const form = formidable({ multiples: false, keepExtensions: true });
       form.parse(req, (err, fields, files) => {
@@ -26,11 +25,11 @@ module.exports = async function handler(req, res) {
 
     const dataBuffer = fs.readFileSync(rawFile.filepath);
     
-    // ১. টেক্সট এক্সট্রাক্ট করা
+    // ১. PDF টেক্সট পার্স করা (Vercel Fix)
     const pdfData = await pdfParse(dataBuffer);
     const text = pdfData.text || '';
 
-    // ২. PDF বাফার থেকে ছবি (JPEG Stream) এক্সট্রাক্ট করা
+    // ২. PDF থেকে JPEG ইমেজ স্ট্রিম এক্সট্রাক্ট
     const extractJpegs = (buffer) => {
       const jpegs = [];
       let start = 0;
@@ -39,7 +38,7 @@ module.exports = async function handler(req, res) {
         if (end !== -1) {
           end += 2;
           const imgBuf = buffer.slice(start, end);
-          if (imgBuf.length > 2000) { // ফিল্টার ছোট আইকন বা আর্টিফ্যাক্ট বাদ দিতে
+          if (imgBuf.length > 2000) {
             jpegs.push('data:image/jpeg;base64,' + imgBuf.toString('base64'));
           }
           start = end;
