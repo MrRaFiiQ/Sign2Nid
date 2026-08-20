@@ -17,12 +17,12 @@ mkdir($uploadDir);
 $pdfPath = $uploadDir . '/uploaded.pdf';
 move_uploaded_file($_FILES['nid_pdf']['tmp_name'], $pdfPath);
 
-// লেআউট ছাড়া সাধারণ টেক্সট এক্সট্রাক্ট করে দেখা
+// ১. টেক্সট এক্সট্রাক্ট করা
 $textPath = $uploadDir . '/text.txt';
-exec("pdftotext " . escapeshellarg($pdfPath) . " " . escapeshellarg($textPath));
+exec("pdftotext -layout " . escapeshellarg($pdfPath) . " " . escapeshellarg($textPath));
 $rawText = file_exists($textPath) ? file_get_contents($textPath) : "";
 
-// ছবি এক্সট্রাকশন
+// ২. ছবি এক্সট্রাক্ট করা
 exec("pdfimages -all " . escapeshellarg($pdfPath) . " " . escapeshellarg($uploadDir . '/img'));
 $images = glob($uploadDir . '/img-*');
 $userIMG = "";
@@ -38,12 +38,12 @@ if (count($images) > 0) {
     }
 }
 
-// রেজেক্স বাদ দিয়ে সরাসরি র টেক্সট এবং ছবি চেক করার জন্য আউটপুট পাঠানো হচ্ছে
+// ৩. রেজেক্স ছাড়াই সরাসরি ডায়াগনস্টিক আউটপুট
 $response = [
     "code" => 200,
     "success" => true,
-    "message" => "Debug Mode",
-    "raw_pdf_text" => $rawText, // এটি দেখলে বোঝা যাবে পিডিএফের ভেতরের লেখাগুলো কীভাবে সাজানো আছে
+    "message" => "Text Length: " . mb_strlen($rawText),
+    "raw_text_sample" => mb_substr($rawText, 0, 400), // পিডিএফ থেকে পড়া প্রথম ৪০০ ক্যারেক্টার
     "data" => [
         "nameBangla" => "",
         "nameEnglish" => "",
