@@ -1,6 +1,6 @@
-FROM php:8.3-apache-bookworm
+FROM php:8.3-apache
 
-ENV DEBIAN_FRONTEND=noninteractive
+ENV APACHE_DOCUMENT_ROOT=/var/www/html
 
 RUN apt-get update && apt-get install -y \
     poppler-utils \
@@ -24,11 +24,13 @@ RUN docker-php-ext-configure gd \
         mbstring \
         zip
 
-COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+RUN a2enmod rewrite
 
 WORKDIR /var/www/html
 
-COPY composer.json ./
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+
+COPY composer.json /var/www/html/
 
 RUN composer install \
         --no-dev \
@@ -37,24 +39,12 @@ RUN composer install \
 
 COPY . /var/www/html/
 
-RUN chmod -R 777 \
-        /var/www/html/uploads \
-        /var/www/html/images
+# -p থাকলে directory আগে থেকেই থাকলেও error হবে না
+RUN mkdir -p /var/www/html/uploads /var/www/html/images \
+    && chmod -R 777 /var/www/html/uploads /var/www/html/images
 
-RUN echo "ServerName localhost" \
-    > /etc/apache2/conf-available/servername.conf \
-    && a2enconf servername
+RUN echo "ServerName localhost" >> /etc/apache2/apache2.conf
 
-RUN printf '%s\n' \
-    'file_uploads=On' \
-    'upload_max_filesize=30M' \
-    'post_max_size=35M' \
-    'memory_limit=512M' \
-    'max_execution_time=180' \
-    'max_input_time=180' \
-    'max_file_uploads=20' \
-    > /usr/local/etc/php/conf.d/nid.ini
-
-RUN a2enmod rewrite headers
+EXPOSE 80
 
 CMD ["apache2-foreground"]
