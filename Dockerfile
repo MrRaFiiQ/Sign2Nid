@@ -49,7 +49,7 @@ WORKDIR /var/www/html
 
 
 # ============================================================
-# COMPOSER DEPENDENCIES
+# COMPOSER
 # ============================================================
 
 COPY composer.json ./
@@ -61,20 +61,17 @@ RUN composer install \
 
 
 # ============================================================
-# APPLICATION FILES
+# APPLICATION
 # ============================================================
 
 COPY . /var/www/html/
 
 
 # ============================================================
-# DIRECTORIES
+# DIRECTORY PERMISSIONS
 # ============================================================
 
-RUN mkdir -p \
-        /var/www/html/uploads \
-        /var/www/html/images \
-    && chmod -R 777 \
+RUN chmod -R 777 \
         /var/www/html/uploads \
         /var/www/html/images
 
@@ -104,14 +101,14 @@ RUN printf '%s\n' \
 
 
 # ============================================================
-# APACHE
+# APACHE MODULES
 # ============================================================
 
 RUN a2enmod rewrite headers
 
 
 # ============================================================
-# START APACHE
+# START
 # ============================================================
 
 CMD ["apache2-foreground"]
