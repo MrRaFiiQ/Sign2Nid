@@ -32,12 +32,12 @@ $uploadDir = sys_get_temp_dir() . '/nid_extract_' . uniqid();
 $pdfPath = $uploadDir . '/uploaded.pdf';
 @move_uploaded_file($_FILES[$fileKey]['tmp_name'], $pdfPath);
 
-// ১. টেক্সট এক্সট্রাক্ট করা
+// ১. টেক্সট এক্সট্রাক্ট করা (ডিফল্ট মোডে যাতে শব্দের স্পেস নষ্ট না হয়)
 $textPath = $uploadDir . '/text.txt';
-@exec("pdftotext -layout " . escapeshellarg($pdfPath) . " " . escapeshellarg($textPath));
+@exec("pdftotext " . escapeshellarg($pdfPath) . " " . escapeshellarg($textPath));
 $text = file_exists($textPath) ? file_get_contents($textPath) : "";
 
-// ২. ছবি ও সিগনেচার এক্সট্রাক্ট করে আলাদা ফোল্ডারে শর্ট লিংক তৈরি করা
+// ২. ছবি ও সিগনেচার এক্সট্রাক্ট করে শর্ট লিংক তৈরি করা
 $imgDir = __DIR__ . '/uploads';
 if (!file_exists($imgDir)) {
     @mkdir($imgDir, 0755, true);
@@ -70,15 +70,8 @@ if (count($images) > 0) {
 }
 
 // ============================================================
-// ADDRESS & TEXT HELPER FUNCTIONS
+// HELPER FUNCTIONS
 // ============================================================
-
-function fixBengaliSpacing($text) {
-    for ($i = 0; $i < 3; $i++) {
-        $text = preg_replace('/([\x{0980}-\x{09FF}])\s+([\x{0980}-\x{09FF}])/u', '$1$2', $text);
-    }
-    return $text;
-}
 
 function extractBetween($text, $start, $end) {
     $pattern = '/' . preg_quote($start, '/') . '[\s\|:]+(.*?)(?=' . preg_quote($end, '/') . '|$)/uis';
@@ -114,7 +107,9 @@ function cleanName($text) {
         'License Documents',
         'Union Porishod',
         'Mouza/Moholla',
-        'Village/Road'
+        'Village/Road',
+        'Pin',
+        'Status'
     ];
     foreach ($unwanted as $word) {
         $pos = mb_stripos($text, $word);
@@ -123,19 +118,18 @@ function cleanName($text) {
         }
     }
     $text = preg_replace('/[\|]+/u', ' ', $text);
-    return fixBengaliSpacing(trim(preg_replace('/\s+/', ' ', $text)));
+    // শব্দের সঠিক স্পেস ঠিক রেখে অতিরিক্ত স্পেস দূর করা (স্পেস মুছে ফেলা হবে না)
+    return trim(preg_replace('/\s+/', ' ', $text));
 }
 
 function extractPostalCode($text) {
+    preg_match('/(?:Postal Code|পোস্ট কোড)[^0-9]*([0-9]{4})/ui', $text, $m2);
+    if(isset($m2[1])) return $m2[1];
+
     $raw = extractBetween($text, 'Postal Code', 'Region');
     if(!$raw) $raw = extractBetween($text, 'Postal Code', 'Upozila');
-    if(!$raw) $raw = extractBetween($text, 'Postal Code', 'District');
-    
     preg_match('/([0-9]{4})/u', $raw, $m);
-    if(isset($m[1])) return $m[1];
-
-    preg_match('/(?:Postal Code|পোস্ট কোড)[^0-9]*([0-9]{4})/ui', $text, $m2);
-    return isset($m2[1]) ? $m2[1] : '';
+    return isset($m[1]) ? $m[1] : '';
 }
 
 function convertToBangla($number) {
@@ -170,8 +164,7 @@ function combineAddress($text) {
     }
 
     $village = str_ireplace(['Village/Road', 'Home/Holding', 'Additional', 'No.', 'No', 'Union/Ward', 'Mouza/Moholla'], '', $villageRaw);
-    $partsVillage = explode('Union', $village);
-    $village = cleanText(fixBengaliSpacing($partsVillage[0]));
+    $village = cleanText($village);
 
     $homeRaw = extractBetween($text, 'Home/Holding', 'Post Office');
     if (!$homeRaw) {
@@ -179,8 +172,7 @@ function combineAddress($text) {
     }
 
     $home = str_ireplace(['Home/Holding', 'Village/Road', 'Additional', 'No.', 'No', 'Union/Ward'], '', $homeRaw);
-    $partsHome = explode('Union', $home);
-    $home = cleanText(fixBengaliSpacing($partsHome[0]));
+    $home = cleanText($home);
 
     $postOffice = cleanText(extractBetween($text, 'Post Office', 'Postal Code'));
     if (!$postOffice) {
@@ -277,8 +269,8 @@ $response = [
         "dateOfToday" => $dateOfToday,
         "fatherName" => $fatherName,
         "motherName" => $motherName,
-        "gender" => $gender ?: "male",
-        "religion" => $religion ?: "Islam",
+        "gender" => $gender,
+        "religion" => $religion,
         "birthPlace" => $birthPlace,
         "bloodGroup" => $bloodGroup,
         "userIMG" => $userIMG,
