@@ -95,21 +95,21 @@ $response = [
     "success" => true,
     "message" => "Data fetched successfully[span_3](start_span)[span_3](end_span)",
     "data" => [
-        "nameBangla" => $nameBangla ?: "মোহাম্মদ ইউসুফ",
-        "nameEnglish" => $nameEnglish ?: "MOHAMMAD YOUSUF",
-        "nationalId" => $nationalId ?: "1050685799",
-        "pin" => $pin ?: "20052616240000405",
-        "dateOfBirth" => $dateOfBirth ?: "2005-02-09",
+        "nameBangla" => $nameBangla ?: "",
+        "nameEnglish" => $nameEnglish ?: "",
+        "nationalId" => $nationalId ?: "",
+        "pin" => $pin ?: "",
+        "dateOfBirth" => $dateOfBirth ?: "",
         "dateOfToday" => $dateOfToday,
-        "fatherName" => $fatherName ?: "মোঃ বাদল সরকার",
-        "motherName" => $motherName ?: "রেহেনা বেগম",
-        "gender" => "male",
-        "religion" => "Islam",
-        "birthPlace" => $birthPlace ?: "ঢাকা",
-        "bloodGroup" => $bloodGroup ?: "B+",
+        "fatherName" => $fatherName ?: "",
+        "motherName" => $motherName ?: "",
+        "gender" => "",
+        "religion" => "",
+        "birthPlace" => $birthPlace ?: "",
+        "bloodGroup" => $bloodGroup ?: "",
         "userIMG" => $userIMG,
         "signIMG" => $signIMG,
-        "address" => $address ?: "বাসা/হোল্ডিং: ৪৭১, গ্রাম/রাস্তা: মুসলেম হাটি, ডাকঘর: খালপাড়, পোস্ট কোড: ১৩২৪, উপজেলা: নবাবগঞ্জ, জেলা: ঢাকা"
+        "address" => $address ?: ""
     ]
 ];
 
