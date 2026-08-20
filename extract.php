@@ -1,7 +1,6 @@
 <?php
 error_reporting(0);
 set_error_handler(function($errno, $errstr, $errfile, $errline) {
-    // সব ধরনের নোটিশ ও ওয়ার্নিং সাইডরোট করে জেসন নিরাপদ রাখা
     return true;
 });
 ini_set('display_errors', '0');
@@ -74,7 +73,6 @@ if (count($images) > 0) {
 // ADDRESS & TEXT HELPER FUNCTIONS
 // ============================================================
 
-// বাংলা ফন্টের কারণে অক্ষরের মাঝে অতিরিক্ত স্পেস দূর করার ফাংশন
 function fixBengaliSpacing($text) {
     for ($i = 0; $i < 3; $i++) {
         $text = preg_replace('/([\x{0980}-\x{09FF}])\s+([\x{0980}-\x{09FF}])/u', '$1$2', $text);
@@ -97,7 +95,8 @@ function cleanText($text) {
         'Village/Road', 'Home/Holding', 'Additional', 'No.', 'No', 
         'Post Office', 'Postal Code', 'Upozila', 'District', 
         'Union/Ward', 'Municipality', 'Smart Card Info', 
-        'No Documents Available', 'Voter Area', 'RMO', 'Mouza/Moholla'
+        'No Documents Available', 'Voter Area', 'RMO', 'Mouza/Moholla',
+        'License Documents', 'Union Porishod'
     ], '', $text);
     return trim($text);
 }
@@ -111,7 +110,11 @@ function cleanName($text) {
         'Death Date', 
         'Religion', 
         'Gender', 
-        'Blood Group'
+        'Blood Group',
+        'License Documents',
+        'Union Porishod',
+        'Mouza/Moholla',
+        'Village/Road'
     ];
     foreach ($unwanted as $word) {
         $pos = mb_stripos($text, $word);
@@ -131,7 +134,6 @@ function extractPostalCode($text) {
     preg_match('/([0-9]{4})/u', $raw, $m);
     if(isset($m[1])) return $m[1];
 
-    // বিকল্প পদ্ধতিতে পুরো টেক্সট থেকে ৪ ডিজিটের পোস্ট কোড খুঁজে নেওয়া
     preg_match('/(?:Postal Code|পোস্ট কোড)[^0-9]*([0-9]{4})/ui', $text, $m2);
     return isset($m2[1]) ? $m2[1] : '';
 }
@@ -155,7 +157,7 @@ function findValueByLabel($searchLabel, $text) {
 // ============================================================
 
 function combineAddress($text) {
-    // প্রথমে Village/Road খোঁজা, না পেলে Mouza/Moholla বা মৌজা চেক করা
+    // গ্রাম/রাস্তা খোঁজা, না পেলে মৌজা/মহল্লা চেক করা
     $villageRaw = extractBetween($text, 'Village/Road', 'Home/Holding');
     if (!$villageRaw) {
         $villageRaw = extractBetween($text, 'Village/Road', 'Post Office');
@@ -165,9 +167,6 @@ function combineAddress($text) {
     }
     if (!$villageRaw) {
         $villageRaw = extractBetween($text, 'Mouza/Moholla', 'Home/Holding');
-    }
-    if (!$villageRaw) {
-        $villageRaw = extractBetween($text, 'মৌজা/মহল্লা', 'ডাকঘর');
     }
 
     $village = str_ireplace(['Village/Road', 'Home/Holding', 'Additional', 'No.', 'No', 'Union/Ward', 'Mouza/Moholla'], '', $villageRaw);
@@ -206,11 +205,11 @@ function combineAddress($text) {
 
     $parts = [];
 
-    if (!empty($home) && $home !== 'Additional') {
+    if (!empty($home) && $home !== 'Additional' && mb_stripos($home, 'No') === false) {
         $parts[] = 'বাসা/হোল্ডিং: ' . $home;
     }
 
-    if (!empty($village) && $village !== 'Additional') {
+    if (!empty($village) && $village !== 'Additional' && mb_stripos($village, 'No') === false) {
         $parts[] = 'গ্রাম/রাস্তা: ' . $village;
     }
 
@@ -278,8 +277,8 @@ $response = [
         "dateOfToday" => $dateOfToday,
         "fatherName" => $fatherName,
         "motherName" => $motherName,
-        "gender" => $gender,
-        "religion" => $religion,
+        "gender" => $gender ?: "male",
+        "religion" => $religion ?: "Islam",
         "birthPlace" => $birthPlace,
         "bloodGroup" => $bloodGroup,
         "userIMG" => $userIMG,
