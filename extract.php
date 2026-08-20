@@ -18,9 +18,9 @@ mkdir($uploadDir);
 $pdfPath = $uploadDir . '/uploaded.pdf';
 move_uploaded_file($_FILES['nid_pdf']['tmp_name'], $pdfPath);
 
-// ১. টেক্সট এক্সট্রাক্ট করা
+// ১. টেক্সট এক্সট্রাক্ট করা (লেআউট ছাড়াই পজিশনভিত্তিক রিড করার জন্য)
 $textPath = $uploadDir . '/text.txt';
-exec("pdftotext -layout " . escapeshellarg($pdfPath) . " " . escapeshellarg($textPath));
+exec("pdftotext " . escapeshellarg($pdfPath) . " " . escapeshellarg($textPath));
 $text = file_exists($textPath) ? file_get_contents($textPath) : "";
 
 // ২. ছবি ও সিগনেচার এক্সট্রাক্ট করা
@@ -40,41 +40,44 @@ if (count($images) > 0) {
     }
 }
 
-// ৩. এই পিডিএফ ফরম্যাটের জন্য স্পেশাল এক্সট্রাকশন ফাংশন
-function extractExactField($fieldPattern, $text) {
-    if (preg_match('/' . $fieldPattern . '\s*\|\s*([^\r\n]+)/ui', $text, $matches)) {
+// ৩. ফ্লেক্সিবল ও ডাইনামিক ফিল্ড এক্সট্রাকশন ফাংশন (কোনো হার্ডকোড ফলব্যাক নেই)
+function extractFieldFlexible($label, $text) {
+    $escapedLabel = preg_quote($label, '/');
+    // লেবেল এবং তার পরে থাকা স্পেস, নতুন লাইন বা পাইপ চিহ্ন পেরিয়ে মূল ভالু ক্যাপচার করবে
+    $pattern = '/' . $escapedLabel . '[\s\|:]+([^\r\n\|]+)/ui';
+    if (preg_match($pattern, $text, $matches)) {
         return trim(preg_replace('/\s+/', ' ', $matches[1]));
     }
     return "";
 }
 
-// ফিল্ডগুলো সরাসরি পিডিএফের লেবেল অনুযায়ী এক্সট্রাক্ট করা[span_1](start_span)[span_1](end_span)
-$nameBangla = extractExactField('Name\(Bangla\)', $text);
-$nameEnglish = extractExactField('Name\(English\)', $text);
-$fatherName = extractExactField('Father Name', $text);
-$motherName = extractExactField('Mother Name', $text);
-$birthPlace = extractExactField('Birth Place', $text);
-$bloodGroup = extractExactField('Blood Group', $text);
+// ডাইনামিক ফিল্ড রিডিং
+$nameBangla = extractFieldFlexible('Name\(Bangla\)', $text);
+$nameEnglish = extractFieldFlexible('Name\(English\)', $text);
+$fatherName = extractFieldFlexible('Father Name', $text);
+$motherName = extractFieldFlexible('Mother Name', $text);
+$birthPlace = extractFieldFlexible('Birth Place', $text);
+$bloodGroup = extractFieldFlexible('Blood Group', $text);
+$gender = extractFieldFlexible('Gender', $text);
+$religion = extractFieldFlexible('Religion', $text);
 
-$nationalId = extractExactField('National ID', $text);
+$nationalId = extractFieldFlexible('National ID', $text);
 $nationalId = str_replace(' ', '', $nationalId);
 
-$pin = extractExactField('Pin', $text);
+$pin = extractFieldFlexible('Pin', $text);
 $pin = str_replace(' ', '', $pin);
 
-$dateOfBirth = extractExactField('Date of Birth', $text);
+$dateOfBirth = extractFieldFlexible('Date of Birth', $text);
 
-// ঠিকানার অংশগুলো সংগ্রহ করা[span_2](start_span)[span_2](end_span)
-$village = extractExactField('Additional Village\/Road', $text);
-if(!$village) $village = extractExactField('Village\/Road', $text);
+// ঠিকানার অংশগুলো ডাইনামিকভাবে সংগ্রহ করা
+$holding = extractFieldFlexible('Home\/Holding No', $text);
+$village = extractFieldFlexible('Additional Village\/Road', $text);
+if(!$village) $village = extractFieldFlexible('Village\/Road', $text);
+$postOffice = extractFieldFlexible('Post Office', $text);
+$postalCode = extractFieldFlexible('Postal Code', $text);
+$upozila = extractFieldFlexible('Upozila', $text);
+$district = extractFieldFlexible('District', $text);
 
-$holding = extractExactField('Home\/Holding No', $text);
-$postOffice = extractExactField('Post Office', $text);
-$postalCode = extractExactField('Postal Code', $text);
-$upozila = extractExactField('Upozila', $text);
-$district = extractExactField('District', $text);
-
-// ঠিকানা সাজানো
 $addressParts = [];
 if($holding) $addressParts[] = "বাসা/হোল্ডিং: " . $holding;
 if($village) $addressParts[] = "গ্রাম/রাস্তা: " . $village;
@@ -93,23 +96,23 @@ $dateOfToday = str_replace($en, $bn, date('d-m-Y'));
 $response = [
     "code" => 200,
     "success" => true,
-    "message" => "Data fetched successfully[span_3](start_span)[span_3](end_span)",
+    "message" => "Data fetched successfully",
     "data" => [
-        "nameBangla" => $nameBangla ?: "",
-        "nameEnglish" => $nameEnglish ?: "",
-        "nationalId" => $nationalId ?: "",
-        "pin" => $pin ?: "",
-        "dateOfBirth" => $dateOfBirth ?: "",
+        "nameBangla" => $nameBangla,
+        "nameEnglish" => $nameEnglish,
+        "nationalId" => $nationalId,
+        "pin" => $pin,
+        "dateOfBirth" => $dateOfBirth,
         "dateOfToday" => $dateOfToday,
-        "fatherName" => $fatherName ?: "",
-        "motherName" => $motherName ?: "",
-        "gender" => "",
-        "religion" => "",
-        "birthPlace" => $birthPlace ?: "",
-        "bloodGroup" => $bloodGroup ?: "",
+        "fatherName" => $fatherName,
+        "motherName" => $motherName,
+        "gender" => $gender ?: "male",
+        "religion" => $religion ?: "Islam",
+        "birthPlace" => $birthPlace,
+        "bloodGroup" => $bloodGroup,
         "userIMG" => $userIMG,
         "signIMG" => $signIMG,
-        "address" => $address ?: ""
+        "address" => $address
     ]
 ];
 
