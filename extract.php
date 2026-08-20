@@ -32,7 +32,7 @@ $uploadDir = sys_get_temp_dir() . '/nid_extract_' . uniqid();
 $pdfPath = $uploadDir . '/uploaded.pdf';
 @move_uploaded_file($_FILES[$fileKey]['tmp_name'], $pdfPath);
 
-// ১. টেক্সট এক্সট্রাক্ট করা (ডিফল্ট মোডে যাতে শব্দের স্পেস নষ্ট না হয়)
+// ১. টেক্সট এক্সট্রাক্ট করা
 $textPath = $uploadDir . '/text.txt';
 @exec("pdftotext " . escapeshellarg($pdfPath) . " " . escapeshellarg($textPath));
 $text = file_exists($textPath) ? file_get_contents($textPath) : "";
@@ -89,7 +89,8 @@ function cleanText($text) {
         'Post Office', 'Postal Code', 'Upozila', 'District', 
         'Union/Ward', 'Municipality', 'Smart Card Info', 
         'No Documents Available', 'Voter Area', 'RMO', 'Mouza/Moholla',
-        'License Documents', 'Union Porishod'
+        'License Documents', 'Union Porishod', 'Permanent Address', 
+        'Education', 'Region', 'Division', 'City Corporation', 'Ward For'
     ], '', $text);
     return trim($text);
 }
@@ -118,7 +119,6 @@ function cleanName($text) {
         }
     }
     $text = preg_replace('/[\|]+/u', ' ', $text);
-    // শব্দের সঠিক স্পেস ঠিক রেখে অতিরিক্ত স্পেস দূর করা (স্পেস মুছে ফেলা হবে না)
     return trim(preg_replace('/\s+/', ' ', $text));
 }
 
@@ -147,11 +147,18 @@ function findValueByLabel($searchLabel, $text) {
 }
 
 // ============================================================
-// COMBINE ADDRESS LOGIC
+// COMBINE ADDRESS LOGIC (ISOLATED PRESENT ADDRESS BLOCK)
 // ============================================================
 
-function combineAddress($text) {
-    // গ্রাম/রাস্তা খোঁজা, না পেলে মৌজা/মহল্লা চেক করা
+function combineAddress($fullText) {
+    // শুধু 'Present Address' থেকে 'Permanent Address' পর্যন্ত অংশটুকু আলাদা করে নেওয়া
+    $blockPattern = '/Present\s*Address(.*?)(?:Permanent\s*Address|$)/uis';
+    $text = $fullText;
+    if (preg_match($blockPattern, $fullText, $mBlock)) {
+        $text = $mBlock[1];
+    }
+
+    // গ্রাম/রাস্তা বা মৌজা/মহল্লা এক্সট্রাক্ট করা
     $villageRaw = extractBetween($text, 'Village/Road', 'Home/Holding');
     if (!$villageRaw) {
         $villageRaw = extractBetween($text, 'Village/Road', 'Post Office');
@@ -180,6 +187,9 @@ function combineAddress($text) {
     }
 
     $postalCode = extractPostalCode($text);
+    if (!$postalCode) {
+        $postalCode = extractPostalCode($fullText); // ফেইলব্যাক
+    }
     $postalCodeBangla = convertToBangla($postalCode);
 
     $upozila = cleanText(extractBetween($text, 'Upozila', 'Union'));
