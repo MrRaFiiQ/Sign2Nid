@@ -1,15 +1,25 @@
 <?php
 
 // ============================================================
-// NID PDF DATA EXTRACTION API
-// Improved Text + Photo + Signature Extraction
+// NID PDF EXTRACTION API
+// Robust Version
+//
+// Supports:
+// - nid_pdf / pdf upload field
+// - pdftotext
+// - pdfimages
+// - pdftoppm
+// - Smalot PDF Parser fallback
+// - GD optional
+// - Imagick optional
+// - Photo / Signature detection
+// - Signature cleanup when GD is available
+// - Page crop fallback
+// - Dependency diagnostics
 // ============================================================
 
-error_reporting(0);
 
-set_error_handler(function ($errno, $errstr, $errfile, $errline) {
-    return true;
-});
+error_reporting(0);
 
 ini_set('display_errors', '0');
 
@@ -21,87 +31,162 @@ date_default_timezone_set('Asia/Dhaka');
 
 
 // ============================================================
+// ERROR HANDLER
+// ============================================================
+
+set_error_handler(function ($errno, $errstr, $errfile, $errline) {
+
+    return true;
+
+});
+
+
+// ============================================================
+// RESPONSE HELPER
+// ============================================================
+
+function jsonResponse(
+    $data,
+    $httpCode = 200
+) {
+
+    while (ob_get_level()) {
+        @ob_end_clean();
+    }
+
+    http_response_code($httpCode);
+
+    echo json_encode(
+        $data,
+        JSON_PRETTY_PRINT |
+        JSON_UNESCAPED_UNICODE |
+        JSON_UNESCAPED_SLASHES
+    );
+
+    exit;
+}
+
+
+// ============================================================
 // REQUEST METHOD
 // ============================================================
 
-if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+if (
+    ($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST'
+) {
 
-    ob_clean();
-
-    http_response_code(405);
-
-    echo json_encode(
+    jsonResponse(
         [
             'code'    => 405,
             'success' => false,
             'message' => 'Method Not Allowed'
         ],
-        JSON_UNESCAPED_UNICODE |
-        JSON_UNESCAPED_SLASHES
+        405
     );
-
-    exit;
 }
 
 
 // ============================================================
-// FIND UPLOADED PDF
+// UPLOAD FIELD
 // ============================================================
 
-$fileKey = isset($_FILES['nid_pdf'])
-    ? 'nid_pdf'
-    : 'pdf';
+$fileKey =
+    isset($_FILES['nid_pdf'])
+        ? 'nid_pdf'
+        : 'pdf';
 
 
 if (
-    !isset($_FILES[$fileKey]) ||
+    !isset($_FILES[$fileKey])
+) {
+
+    jsonResponse(
+        [
+            'code'    => 400,
+            'success' => false,
+            'message' => 'No PDF file uploaded.'
+        ],
+        400
+    );
+}
+
+
+if (
     $_FILES[$fileKey]['error'] !== UPLOAD_ERR_OK
 ) {
 
-    ob_clean();
-
-    http_response_code(400);
-
-    echo json_encode(
+    jsonResponse(
         [
             'code'    => 400,
             'success' => false,
-            'message' => 'No file uploaded or upload error occurred.'
+            'message' =>
+                uploadErrorMessage(
+                    $_FILES[$fileKey]['error']
+                )
         ],
-        JSON_UNESCAPED_UNICODE |
-        JSON_UNESCAPED_SLASHES
+        400
     );
-
-    exit;
 }
 
 
 // ============================================================
-// FILE SIZE LIMIT
+// FILE SIZE
 // ============================================================
 
-$maxFileSize = 15 * 1024 * 1024; // 15 MB
+$maxFileSize =
+    15 * 1024 * 1024;
+
 
 if (
-    isset($_FILES[$fileKey]['size']) &&
+    !empty($_FILES[$fileKey]['size']) &&
     $_FILES[$fileKey]['size'] > $maxFileSize
 ) {
 
-    ob_clean();
-
-    http_response_code(400);
-
-    echo json_encode(
+    jsonResponse(
         [
             'code'    => 400,
             'success' => false,
-            'message' => 'PDF file is too large. Maximum 15 MB allowed.'
+            'message' =>
+                'Maximum PDF size is 15 MB.'
         ],
-        JSON_UNESCAPED_UNICODE |
-        JSON_UNESCAPED_SLASHES
+        400
+    );
+}
+
+
+// ============================================================
+// ORIGINAL FILE NAME
+// ============================================================
+
+$originalName =
+    basename(
+        $_FILES[$fileKey]['name'] ??
+        'document.pdf'
     );
 
-    exit;
+
+$extension =
+    strtolower(
+        pathinfo(
+            $originalName,
+            PATHINFO_EXTENSION
+        )
+    );
+
+
+if (
+    $extension !== 'pdf'
+) {
+
+    jsonResponse(
+        [
+            'code'    => 400,
+            'success' => false,
+            'message' =>
+                'Invalid file type. Only PDF files are allowed.'
+        ],
+        400
+    );
 }
 
 
@@ -109,26 +194,41 @@ if (
 // TEMP DIRECTORY
 // ============================================================
 
-$uploadDir =
+$tempDir =
     sys_get_temp_dir() .
     '/nid_extract_' .
-    uniqid('', true);
+    bin2hex(
+        random_bytes(8)
+    );
 
 
-@mkdir(
-    $uploadDir,
-    0755,
-    true
-);
+if (
+    !@mkdir(
+        $tempDir,
+        0755,
+        true
+    )
+) {
+
+    jsonResponse(
+        [
+            'code'    => 500,
+            'success' => false,
+            'message' =>
+                'Unable to create temporary directory.'
+        ],
+        500
+    );
+}
 
 
 $pdfPath =
-    $uploadDir .
+    $tempDir .
     '/uploaded.pdf';
 
 
 // ============================================================
-// MOVE UPLOADED PDF
+// MOVE UPLOADED FILE
 // ============================================================
 
 if (
@@ -138,64 +238,100 @@ if (
     )
 ) {
 
-    ob_clean();
+    removeDirectory($tempDir);
 
-    http_response_code(500);
-
-    echo json_encode(
+    jsonResponse(
         [
             'code'    => 500,
             'success' => false,
-            'message' => 'Failed to move uploaded file.'
+            'message' =>
+                'Failed to move uploaded PDF.'
         ],
-        JSON_UNESCAPED_UNICODE |
-        JSON_UNESCAPED_SLASHES
+        500
     );
-
-    removeDirectory($uploadDir);
-
-    exit;
 }
 
 
 // ============================================================
-// PDF MIME / EXTENSION CHECK
+// BASIC PDF SIGNATURE CHECK
 // ============================================================
 
-$fileName =
-    basename(
-        $_FILES[$fileKey]['name'] ?? 'document.pdf'
-    );
-
-$extension =
-    strtolower(
-        pathinfo(
-            $fileName,
-            PATHINFO_EXTENSION
-        )
+$header =
+    @file_get_contents(
+        $pdfPath,
+        false,
+        null,
+        0,
+        5
     );
 
 
-if ($extension !== 'pdf') {
+if (
+    $header !== '%PDF-'
+) {
 
-    ob_clean();
+    removeDirectory($tempDir);
 
-    http_response_code(400);
-
-    echo json_encode(
+    jsonResponse(
         [
             'code'    => 400,
             'success' => false,
-            'message' => 'Invalid file type. Only PDF files are allowed.'
+            'message' =>
+                'Uploaded file is not a valid PDF.'
         ],
-        JSON_UNESCAPED_UNICODE |
-        JSON_UNESCAPED_SLASHES
+        400
     );
-
-    removeDirectory($uploadDir);
-
-    exit;
 }
+
+
+// ============================================================
+// IMAGE DIRECTORY
+// ============================================================
+
+$imgDir =
+    __DIR__ .
+    '/uploads';
+
+
+if (
+    !is_dir($imgDir)
+) {
+
+    @mkdir(
+        $imgDir,
+        0755,
+        true
+    );
+}
+
+
+if (
+    !is_dir($imgDir) ||
+    !is_writable($imgDir)
+) {
+
+    removeDirectory($tempDir);
+
+    jsonResponse(
+        [
+            'code'    => 500,
+            'success' => false,
+            'message' =>
+                'uploads directory does not exist or is not writable.',
+            'path' =>
+                $imgDir
+        ],
+        500
+    );
+}
+
+
+// ============================================================
+// DEPENDENCY INFORMATION
+// ============================================================
+
+$dependencies =
+    getDependencyStatus();
 
 
 // ============================================================
@@ -204,97 +340,63 @@ if ($extension !== 'pdf') {
 
 try {
 
-    // --------------------------------------------------------
+    // ========================================================
     // TEXT EXTRACTION
-    // --------------------------------------------------------
+    // ========================================================
 
-    $textPath =
-        $uploadDir .
-        '/text.txt';
-
-
-    $textCommand =
-        'pdftotext -layout ' .
-        escapeshellarg($pdfPath) .
-        ' ' .
-        escapeshellarg($textPath);
-
-
-    if (function_exists('exec')) {
-        @exec($textCommand);
-    }
-
-
-    $text = '';
+    $text =
+        extractPdfText(
+            $pdfPath,
+            $tempDir
+        );
 
 
     if (
-        file_exists($textPath)
+        trim($text) === ''
     ) {
 
-        $text =
-            @file_get_contents(
-                $textPath
-            );
-    }
+        removeDirectory($tempDir);
 
-
-    // --------------------------------------------------------
-    // FALLBACK: SMALOT PDF PARSER
-    // --------------------------------------------------------
-
-    if (
-        trim($text) === '' &&
-        file_exists(__DIR__ . '/vendor/autoload.php')
-    ) {
-
-        try {
-
-            require_once __DIR__ . '/vendor/autoload.php';
-
-            if (
-                class_exists(
-                    'Smalot\\PdfParser\\Parser'
-                )
-            ) {
-
-                $parser =
-                    new \Smalot\PdfParser\Parser();
-
-                $pdf =
-                    $parser->parseFile(
-                        $pdfPath
-                    );
-
-                $text =
-                    $pdf->getText();
-            }
-
-        } catch (Throwable $e) {
-
-            // Continue
-        }
+        jsonResponse(
+            [
+                'code'    => 500,
+                'success' => false,
+                'message' =>
+                    'Unable to extract text from the PDF.',
+                'dependencies' =>
+                    $dependencies
+            ],
+            500
+        );
     }
 
 
     // ========================================================
-    // DATA EXTRACTION
+    // DATA
     // ========================================================
 
     $nameBangla =
-        extractNameBangla($text);
+        extractNameBangla(
+            $text
+        );
 
 
     $nameEnglish =
-        extractNameEnglish($text);
+        extractNameEnglish(
+            $text
+        );
 
 
     $nationalId =
-        extractNid($text);
+        extractNid(
+            $text
+        );
 
 
     $pin =
-        extractPin($text);
+        extractPin(
+            $text
+        );
 
 
     $dobRaw =
@@ -341,7 +443,9 @@ try {
         );
 
 
-    if (!$gender) {
+    if (
+        !$gender
+    ) {
 
         $gender =
             findValueByLabel(
@@ -361,7 +465,9 @@ try {
         );
 
 
-    if (!$religion) {
+    if (
+        !$religion
+    ) {
 
         $religion =
             findValueByLabel(
@@ -381,133 +487,21 @@ try {
         );
 
 
+    if (
+        !$birthPlace
+    ) {
+
+        $birthPlace =
+            findValueByLabel(
+                'Birth Place',
+                $text
+            );
+    }
+
+
     $bloodGroup =
         extractBloodGroup(
             $text
-        );
-
-
-    // ========================================================
-    // IMAGE DIRECTORY
-    // ========================================================
-
-    $imgDir =
-        __DIR__ .
-        '/uploads';
-
-
-    if (!is_dir($imgDir)) {
-
-        @mkdir(
-            $imgDir,
-            0755,
-            true
-        );
-    }
-
-
-    // ========================================================
-    // BASE URL
-    // ========================================================
-
-    $protocol =
-        (
-            isset($_SERVER['HTTPS']) &&
-            (
-                $_SERVER['HTTPS'] === 'on' ||
-                $_SERVER['HTTPS'] == 1
-            )
-        )
-        ? 'https'
-        : 'http';
-
-
-    $host =
-        $_SERVER['HTTP_HOST'] ??
-        'localhost';
-
-
-    $baseUrl =
-        $protocol .
-        '://' .
-        $host;
-
-
-    $scriptDir =
-        dirname(
-            $_SERVER['SCRIPT_NAME'] ?? ''
-        );
-
-
-    $scriptDir =
-        str_replace(
-            '\\',
-            '/',
-            $scriptDir
-        );
-
-
-    $scriptDir =
-        rtrim(
-            $scriptDir,
-            '/'
-        );
-
-
-    $uploadsUrl =
-        $baseUrl .
-        $scriptDir .
-        '/uploads/';
-
-
-    // ========================================================
-    // IMAGE EXTRACTION
-    // ========================================================
-
-    $imageResult =
-        extractImagesFromPdf(
-            $pdfPath,
-            $uploadDir,
-            $imgDir
-        );
-
-
-    $userIMG = '';
-
-    $signIMG = '';
-
-
-    if (
-        !empty(
-            $imageResult['user']
-        )
-    ) {
-
-        $userIMG =
-            $uploadsUrl .
-            $imageResult['user'];
-    }
-
-
-    if (
-        !empty(
-            $imageResult['signature']
-        )
-    ) {
-
-        $signIMG =
-            $uploadsUrl .
-            $imageResult['signature'];
-    }
-
-
-    // ========================================================
-    // TODAY
-    // ========================================================
-
-    $dateOfToday =
-        convertToBangla(
-            date('d-m-Y')
         );
 
 
@@ -518,6 +512,64 @@ try {
     $address =
         combineAddress(
             $text
+        );
+
+
+    // ========================================================
+    // IMAGE EXTRACTION
+    // ========================================================
+
+    $images =
+        extractImagesFromPdf(
+            $pdfPath,
+            $tempDir,
+            $imgDir
+        );
+
+
+    // ========================================================
+    // URL
+    // ========================================================
+
+    $uploadsUrl =
+        getUploadsUrl();
+
+
+    $userIMG =
+        '';
+
+
+    $signIMG =
+        '';
+
+
+    if (
+        !empty($images['user'])
+    ) {
+
+        $userIMG =
+            $uploadsUrl .
+            $images['user'];
+    }
+
+
+    if (
+        !empty($images['signature'])
+    ) {
+
+        $signIMG =
+            $uploadsUrl .
+            $images['signature'];
+    }
+
+
+    // ========================================================
+    // TODAY
+    // ========================================================
+
+    $dateOfToday =
+        convertToBangla(
+            date('d-m-Y')
         );
 
 
@@ -582,67 +634,281 @@ try {
 
             'address' =>
                 $address
+        ],
+
+        'system' => [
+
+            'gd' =>
+                $dependencies['gd'],
+
+            'imagick' =>
+                $dependencies['imagick'],
+
+            'pdftotext' =>
+                $dependencies['pdftotext'],
+
+            'pdfimages' =>
+                $dependencies['pdfimages'],
+
+            'pdftoppm' =>
+                $dependencies['pdftoppm']
         ]
     ];
 
 
-    ob_clean();
+    removeDirectory(
+        $tempDir
+    );
 
 
-    echo json_encode(
+    jsonResponse(
         $response,
-        JSON_PRETTY_PRINT |
-        JSON_UNESCAPED_UNICODE |
-        JSON_UNESCAPED_SLASHES
+        200
     );
 
 
 } catch (Throwable $e) {
 
-    ob_clean();
+    $errorMessage =
+        $e->getMessage();
 
-    http_response_code(500);
 
-    echo json_encode(
-        [
-            'code'    => 500,
-            'success' => false,
-            'message' => 'Error processing the PDF.'
-        ],
-        JSON_PRETTY_PRINT |
-        JSON_UNESCAPED_UNICODE |
-        JSON_UNESCAPED_SLASHES
-    );
+    $errorFile =
+        basename(
+            $e->getFile()
+        );
 
-} finally {
 
-    // ========================================================
-    // CLEAN TEMP DIRECTORY
-    // ========================================================
+    $errorLine =
+        $e->getLine();
+
 
     removeDirectory(
-        $uploadDir
+        $tempDir
     );
 
+
+    jsonResponse(
+        [
+            'code' =>
+                500,
+
+            'success' =>
+                false,
+
+            'message' =>
+                'Error processing the PDF.',
+
+            'error' =>
+                $errorMessage,
+
+            'file' =>
+                $errorFile,
+
+            'line' =>
+                $errorLine,
+
+            'dependencies' =>
+                $dependencies
+        ],
+        500
+    );
 }
-
-
-if (ob_get_level()) {
-    @ob_end_flush();
-}
-
-exit;
 
 
 // ============================================================
-// IMAGE EXTRACTION
+// GET DEPENDENCY STATUS
+// ============================================================
+
+function getDependencyStatus()
+{
+
+    return [
+
+        'gd' =>
+            function_exists(
+                'imagecreatetruecolor'
+            ),
+
+        'imagick' =>
+            extension_loaded(
+                'imagick'
+            ),
+
+        'pdftotext' =>
+            commandExists(
+                'pdftotext'
+            ),
+
+        'pdfimages' =>
+            commandExists(
+                'pdfimages'
+            ),
+
+        'pdftoppm' =>
+            commandExists(
+                'pdftoppm'
+            ),
+
+        'curl' =>
+            function_exists(
+                'curl_init'
+            )
+    ];
+}
+
+
+// ============================================================
+// CHECK COMMAND
+// ============================================================
+
+function commandExists(
+    $command
+)
+{
+
+    if (
+        !function_exists('exec')
+    ) {
+        return false;
+    }
+
+
+    $output = [];
+
+    $returnCode = 1;
+
+
+    @exec(
+        'command -v ' .
+        escapeshellarg($command) .
+        ' 2>/dev/null',
+        $output,
+        $returnCode
+    );
+
+
+    return
+        $returnCode === 0 &&
+        !empty($output);
+}
+
+
+// ============================================================
+// EXTRACT PDF TEXT
+// ============================================================
+
+function extractPdfText(
+    $pdfPath,
+    $tempDir
+)
+{
+
+    $text = '';
+
+
+    // ========================================================
+    // METHOD 1: PDFTOTEXT
+    // ========================================================
+
+    if (
+        commandExists('pdftotext')
+    ) {
+
+        $textPath =
+            $tempDir .
+            '/text.txt';
+
+
+        $command =
+            'pdftotext ' .
+            '-layout ' .
+            '-enc UTF-8 ' .
+            escapeshellarg($pdfPath) .
+            ' ' .
+            escapeshellarg($textPath) .
+            ' 2>/dev/null';
+
+
+        @exec($command);
+
+
+        if (
+            file_exists($textPath)
+        ) {
+
+            $text =
+                @file_get_contents(
+                    $textPath
+                );
+        }
+    }
+
+
+    // ========================================================
+    // METHOD 2: SMALOT
+    // ========================================================
+
+    if (
+        trim($text) === ''
+    ) {
+
+        $autoload =
+            __DIR__ .
+            '/vendor/autoload.php';
+
+
+        if (
+            file_exists($autoload)
+        ) {
+
+            try {
+
+                require_once $autoload;
+
+
+                if (
+                    class_exists(
+                        'Smalot\\PdfParser\\Parser'
+                    )
+                ) {
+
+                    $parser =
+                        new \Smalot\PdfParser\Parser();
+
+
+                    $pdf =
+                        $parser->parseFile(
+                            $pdfPath
+                        );
+
+
+                    $text =
+                        $pdf->getText();
+                }
+
+            } catch (Throwable $e) {
+
+                // Continue
+            }
+        }
+    }
+
+
+    return $text;
+}
+
+
+// ============================================================
+// EXTRACT IMAGES
 // ============================================================
 
 function extractImagesFromPdf(
     $pdfPath,
     $tempDir,
     $imgDir
-) {
+)
+{
 
     $result = [
 
@@ -665,7 +931,9 @@ function extractImagesFromPdf(
     // METHOD 1: PDFIMAGES
     // ========================================================
 
-    if (function_exists('exec')) {
+    if (
+        commandExists('pdfimages')
+    ) {
 
         $prefix =
             $tempDir .
@@ -674,10 +942,12 @@ function extractImagesFromPdf(
 
 
         $command =
-            'pdfimages -png ' .
+            'pdfimages ' .
+            '-png ' .
             escapeshellarg($pdfPath) .
             ' ' .
-            escapeshellarg($prefix);
+            escapeshellarg($prefix) .
+            ' 2>/dev/null';
 
 
         @exec($command);
@@ -701,157 +971,34 @@ function extractImagesFromPdf(
                 $files as $file
             ) {
 
+                processExtractedImage(
+                    $file,
+                    $result,
+                    $imgDir,
+                    $uniqueId
+                );
+
+
                 if (
-                    !file_exists($file)
+                    $result['user'] &&
+                    $result['signature']
                 ) {
-                    continue;
-                }
 
+                    break;
+                }
+            }
+
+
+            foreach (
+                $files as $file
+            ) {
 
                 if (
-                    @filesize($file) < 100
-                ) {
-
-                    @unlink($file);
-
-                    continue;
-                }
-
-
-                $size =
-                    @getimagesize(
-                        $file
-                    );
-
-
-                if (!$size) {
-
-                    @unlink($file);
-
-                    continue;
-                }
-
-
-                $w =
-                    (int)$size[0];
-
-
-                $h =
-                    (int)$size[1];
-
-
-                if (
-                    $w <= 0 ||
-                    $h <= 0
+                    file_exists($file)
                 ) {
 
                     @unlink($file);
-
-                    continue;
                 }
-
-
-                $ratio =
-                    $w / $h;
-
-
-                // ------------------------------------------------
-                // SIGNATURE
-                // ------------------------------------------------
-
-                if (
-                    !$result['signature'] &&
-                    $ratio >= 1.7
-                ) {
-
-                    $fileName =
-                        'sign_' .
-                        $uniqueId .
-                        '.png';
-
-
-                    $destination =
-                        $imgDir .
-                        '/' .
-                        $fileName;
-
-
-                    if (
-                        normalizeSignatureImage(
-                            $file,
-                            $destination
-                        )
-                    ) {
-
-                        $result['signature'] =
-                            $fileName;
-
-
-                        @unlink($file);
-
-                        continue;
-                    }
-
-
-                    @unlink(
-                        $destination
-                    );
-                }
-
-
-                // ------------------------------------------------
-                // USER PHOTO
-                // ------------------------------------------------
-
-                if (
-                    !$result['user'] &&
-                    $ratio < 1.7 &&
-                    $h > ($w * 0.85)
-                ) {
-
-                    $fileName =
-                        'user_' .
-                        $uniqueId .
-                        '.png';
-
-
-                    $destination =
-                        $imgDir .
-                        '/' .
-                        $fileName;
-
-
-                    if (
-                        @copy(
-                            $file,
-                            $destination
-                        )
-                    ) {
-
-                        if (
-                            !isBlankOrSolidImage(
-                                $destination
-                            )
-                        ) {
-
-                            $result['user'] =
-                                $fileName;
-
-
-                            @unlink($file);
-
-                            continue;
-                        }
-                    }
-
-
-                    @unlink(
-                        $destination
-                    );
-                }
-
-
-                @unlink($file);
             }
         }
     }
@@ -862,246 +1009,22 @@ function extractImagesFromPdf(
     // ========================================================
 
     if (
-        (!$result['user'] ||
-        !$result['signature']) &&
-        file_exists(
-            __DIR__ .
-            '/vendor/autoload.php'
-        )
+        !$result['user'] ||
+        !$result['signature']
     ) {
 
-        try {
-
-            require_once __DIR__ .
-                '/vendor/autoload.php';
-
-
-            if (
-                class_exists(
-                    'Smalot\\PdfParser\\Parser'
-                )
-            ) {
-
-                $parser =
-                    new \Smalot\PdfParser\Parser();
-
-
-                $pdf =
-                    $parser->parseFile(
-                        $pdfPath
-                    );
-
-
-                $objects =
-                    $pdf->getObjectsByType(
-                        'XObject',
-                        'Image'
-                    );
-
-
-                $index = 0;
-
-
-                foreach (
-                    $objects as $object
-                ) {
-
-                    if (
-                        !method_exists(
-                            $object,
-                            'getContent'
-                        )
-                    ) {
-
-                        $index++;
-
-                        continue;
-                    }
-
-
-                    $content =
-                        $object->getContent();
-
-
-                    if (
-                        empty($content)
-                    ) {
-
-                        $index++;
-
-                        continue;
-                    }
-
-
-                    $tmp =
-                        $tempDir .
-                        '/object_' .
-                        $index .
-                        '.img';
-
-
-                    @file_put_contents(
-                        $tmp,
-                        $content
-                    );
-
-
-                    $size =
-                        @getimagesize(
-                            $tmp
-                        );
-
-
-                    if (!$size) {
-
-                        @unlink($tmp);
-
-                        $index++;
-
-                        continue;
-                    }
-
-
-                    $w =
-                        (int)$size[0];
-
-
-                    $h =
-                        (int)$size[1];
-
-
-                    if (
-                        $w <= 0 ||
-                        $h <= 0
-                    ) {
-
-                        @unlink($tmp);
-
-                        $index++;
-
-                        continue;
-                    }
-
-
-                    $ratio =
-                        $w / $h;
-
-
-                    // ------------------------------------------------
-                    // SIGNATURE
-                    // ------------------------------------------------
-
-                    if (
-                        !$result['signature'] &&
-                        $ratio >= 1.7
-                    ) {
-
-                        $fileName =
-                            'sign_' .
-                            $uniqueId .
-                            '.png';
-
-
-                        $destination =
-                            $imgDir .
-                            '/' .
-                            $fileName;
-
-
-                        if (
-                            normalizeSignatureImage(
-                                $tmp,
-                                $destination
-                            )
-                        ) {
-
-                            $result['signature'] =
-                                $fileName;
-
-
-                            @unlink($tmp);
-
-                            $index++;
-
-                            continue;
-                        }
-
-
-                        @unlink(
-                            $destination
-                        );
-                    }
-
-
-                    // ------------------------------------------------
-                    // USER PHOTO
-                    // ------------------------------------------------
-
-                    if (
-                        !$result['user'] &&
-                        $ratio < 1.7 &&
-                        $h > ($w * 0.85)
-                    ) {
-
-                        $fileName =
-                            'user_' .
-                            $uniqueId .
-                            '.png';
-
-
-                        $destination =
-                            $imgDir .
-                            '/' .
-                            $fileName;
-
-
-                        if (
-                            @copy(
-                                $tmp,
-                                $destination
-                            )
-                        ) {
-
-                            if (
-                                !isBlankOrSolidImage(
-                                    $destination
-                                )
-                            ) {
-
-                                $result['user'] =
-                                    $fileName;
-
-
-                                @unlink($tmp);
-
-                                $index++;
-
-                                continue;
-                            }
-                        }
-
-
-                        @unlink(
-                            $destination
-                        );
-                    }
-
-
-                    @unlink($tmp);
-
-                    $index++;
-                }
-            }
-
-        } catch (Throwable $e) {
-
-            // Continue to fallback
-        }
+        processSmalotImages(
+            $pdfPath,
+            $tempDir,
+            $imgDir,
+            $result,
+            $uniqueId
+        );
     }
 
 
     // ========================================================
-    // METHOD 3: RENDER PAGE 1 + CROP
+    // METHOD 3: PAGE RENDER FALLBACK
     // ========================================================
 
     if (
@@ -1109,205 +1032,23 @@ function extractImagesFromPdf(
         !$result['signature']
     ) {
 
-        $rendered =
-            renderPdfPageOne(
-                $pdfPath,
-                $tempDir,
-                $uniqueId
-            );
-
-
-        if (
-            $rendered &&
-            file_exists($rendered)
-        ) {
-
-            $img =
-                @imagecreatefrompng(
-                    $rendered
-                );
-
-
-            if ($img) {
-
-                $w =
-                    imagesx($img);
-
-
-                $h =
-                    imagesy($img);
-
-
-                // ------------------------------------------------
-                // USER PHOTO FALLBACK
-                // ------------------------------------------------
-
-                if (!$result['user']) {
-
-                    $userRect = [
-
-                        'x' =>
-                            (int)($w * 0.60),
-
-                        'y' =>
-                            (int)($h * 0.005),
-
-                        'width' =>
-                            (int)($w * 0.36),
-
-                        'height' =>
-                            (int)($h * 0.22)
-                    ];
-
-
-                    $crop =
-                        @imagecrop(
-                            $img,
-                            $userRect
-                        );
-
-
-                    if (
-                        $crop !== false
-                    ) {
-
-                        $fileName =
-                            'user_' .
-                            $uniqueId .
-                            '.png';
-
-
-                        $destination =
-                            $imgDir .
-                            '/' .
-                            $fileName;
-
-
-                        @imagepng(
-                            $crop,
-                            $destination,
-                            6
-                        );
-
-
-                        imagedestroy(
-                            $crop
-                        );
-
-
-                        if (
-                            !isBlankOrSolidImage(
-                                $destination
-                            )
-                        ) {
-
-                            $result['user'] =
-                                $fileName;
-
-                        } else {
-
-                            @unlink(
-                                $destination
-                            );
-                        }
-                    }
-                }
-
-
-                // ------------------------------------------------
-                // SIGNATURE FALLBACK
-                // ------------------------------------------------
-
-                if (!$result['signature']) {
-
-                    $signRect = [
-
-                        'x' =>
-                            (int)($w * 0.50),
-
-                        'y' =>
-                            (int)($h * 0.25),
-
-                        'width' =>
-                            (int)($w * 0.45),
-
-                        'height' =>
-                            (int)($h * 0.07)
-                    ];
-
-
-                    $crop =
-                        @imagecrop(
-                            $img,
-                            $signRect
-                        );
-
-
-                    if (
-                        $crop !== false
-                    ) {
-
-                        $fileName =
-                            'sign_' .
-                            $uniqueId .
-                            '.png';
-
-
-                        $destination =
-                            $imgDir .
-                            '/' .
-                            $fileName;
-
-
-                        @imagepng(
-                            $crop,
-                            $destination,
-                            6
-                        );
-
-
-                        imagedestroy(
-                            $crop
-                        );
-
-
-                        if (
-                            trimSignatureImage(
-                                $destination,
-                                $destination
-                            ) &&
-                            !isBlankOrSolidImage(
-                                $destination
-                            )
-                        ) {
-
-                            $result['signature'] =
-                                $fileName;
-
-                        } else {
-
-                            @unlink(
-                                $destination
-                            );
-                        }
-                    }
-                }
-
-
-                imagedestroy($img);
-            }
-
-
-            @unlink($rendered);
-        }
+        processRenderedPage(
+            $pdfPath,
+            $tempDir,
+            $imgDir,
+            $result,
+            $uniqueId
+        );
     }
 
 
     // ========================================================
-    // PLACEHOLDER
+    // PLACEHOLDERS
     // ========================================================
 
-    if (!$result['user']) {
+    if (
+        !$result['user']
+    ) {
 
         $result['user'] =
             createPlaceholderImage(
@@ -1317,7 +1058,9 @@ function extractImagesFromPdf(
     }
 
 
-    if (!$result['signature']) {
+    if (
+        !$result['signature']
+    ) {
 
         $result['signature'] =
             createPlaceholderImage(
@@ -1332,17 +1075,689 @@ function extractImagesFromPdf(
 
 
 // ============================================================
+// PROCESS EXTRACTED IMAGE
+// ============================================================
+
+function processExtractedImage(
+    $file,
+    &$result,
+    $imgDir,
+    $uniqueId
+)
+{
+
+    if (
+        !file_exists($file)
+    ) {
+        return;
+    }
+
+
+    if (
+        @filesize($file) < 100
+    ) {
+        return;
+    }
+
+
+    $size =
+        @getimagesize(
+            $file
+        );
+
+
+    if (!$size) {
+        return;
+    }
+
+
+    $w =
+        (int)$size[0];
+
+
+    $h =
+        (int)$size[1];
+
+
+    if (
+        $w <= 0 ||
+        $h <= 0
+    ) {
+        return;
+    }
+
+
+    $ratio =
+        $w / $h;
+
+
+    // ========================================================
+    // SIGNATURE
+    // ========================================================
+
+    if (
+        !$result['signature'] &&
+        $ratio >= 1.7
+    ) {
+
+        $fileName =
+            'sign_' .
+            $uniqueId .
+            '.png';
+
+
+        $destination =
+            $imgDir .
+            '/' .
+            $fileName;
+
+
+        if (
+            function_exists(
+                'imagecreatefromstring'
+            )
+        ) {
+
+            if (
+                normalizeSignatureImage(
+                    $file,
+                    $destination
+                )
+            ) {
+
+                $result['signature'] =
+                    $fileName;
+
+                return;
+            }
+
+        } else {
+
+            // GD unavailable:
+            // copy original signature image
+
+            if (
+                @copy(
+                    $file,
+                    $destination
+                )
+            ) {
+
+                $result['signature'] =
+                    $fileName;
+
+                return;
+            }
+        }
+
+
+        @unlink(
+            $destination
+        );
+    }
+
+
+    // ========================================================
+    // USER PHOTO
+    // ========================================================
+
+    if (
+        !$result['user'] &&
+        $ratio < 1.7 &&
+        $h > ($w * 0.85)
+    ) {
+
+        $fileName =
+            'user_' .
+            $uniqueId .
+            '.png';
+
+
+        $destination =
+            $imgDir .
+            '/' .
+            $fileName;
+
+
+        if (
+            @copy(
+                $file,
+                $destination
+            )
+        ) {
+
+            if (
+                !function_exists(
+                    'imagecreatefromstring'
+                ) ||
+                !isBlankOrSolidImage(
+                    $destination
+                )
+            ) {
+
+                $result['user'] =
+                    $fileName;
+
+                return;
+            }
+        }
+
+
+        @unlink(
+            $destination
+        );
+    }
+}
+
+
+// ============================================================
+// SMALOT IMAGES
+// ============================================================
+
+function processSmalotImages(
+    $pdfPath,
+    $tempDir,
+    $imgDir,
+    &$result,
+    $uniqueId
+)
+{
+
+    $autoload =
+        __DIR__ .
+        '/vendor/autoload.php';
+
+
+    if (
+        !file_exists($autoload)
+    ) {
+        return;
+    }
+
+
+    try {
+
+        require_once $autoload;
+
+
+        if (
+            !class_exists(
+                'Smalot\\PdfParser\\Parser'
+            )
+        ) {
+            return;
+        }
+
+
+        $parser =
+            new \Smalot\PdfParser\Parser();
+
+
+        $pdf =
+            $parser->parseFile(
+                $pdfPath
+            );
+
+
+        $objects =
+            $pdf->getObjectsByType(
+                'XObject',
+                'Image'
+            );
+
+
+        $index = 0;
+
+
+        foreach (
+            $objects as $object
+        ) {
+
+            if (
+                !method_exists(
+                    $object,
+                    'getContent'
+                )
+            ) {
+
+                $index++;
+
+                continue;
+            }
+
+
+            $content =
+                $object->getContent();
+
+
+            if (
+                empty($content)
+            ) {
+
+                $index++;
+
+                continue;
+            }
+
+
+            $tmp =
+                $tempDir .
+                '/object_' .
+                $index .
+                '.img';
+
+
+            @file_put_contents(
+                $tmp,
+                $content
+            );
+
+
+            processExtractedImage(
+                $tmp,
+                $result,
+                $imgDir,
+                $uniqueId .
+                '_' .
+                $index
+            );
+
+
+            @unlink($tmp);
+
+
+            if (
+                $result['user'] &&
+                $result['signature']
+            ) {
+                break;
+            }
+
+
+            $index++;
+        }
+
+    } catch (Throwable $e) {
+
+        // Ignore and use next fallback
+    }
+}
+
+
+// ============================================================
+// RENDER PAGE
+// ============================================================
+
+function processRenderedPage(
+    $pdfPath,
+    $tempDir,
+    $imgDir,
+    &$result,
+    $uniqueId
+)
+{
+
+    $rendered =
+        renderPdfPageOne(
+            $pdfPath,
+            $tempDir,
+            $uniqueId
+        );
+
+
+    if (
+        !$rendered ||
+        !file_exists($rendered)
+    ) {
+        return;
+    }
+
+
+    // GD is required for crop
+    if (
+        !function_exists(
+            'imagecreatefrompng'
+        )
+    ) {
+
+        @unlink($rendered);
+
+        return;
+    }
+
+
+    $img =
+        @imagecreatefrompng(
+            $rendered
+        );
+
+
+    if (!$img) {
+
+        @unlink($rendered);
+
+        return;
+    }
+
+
+    $w =
+        imagesx($img);
+
+
+    $h =
+        imagesy($img);
+
+
+    // ========================================================
+    // USER PHOTO CROP
+    // ========================================================
+
+    if (
+        !$result['user']
+    ) {
+
+        $userRect = [
+
+            'x' =>
+                (int)($w * 0.60),
+
+            'y' =>
+                (int)($h * 0.005),
+
+            'width' =>
+                (int)($w * 0.36),
+
+            'height' =>
+                (int)($h * 0.22)
+        ];
+
+
+        $crop =
+            @imagecrop(
+                $img,
+                $userRect
+            );
+
+
+        if (
+            $crop !== false
+        ) {
+
+            $fileName =
+                'user_' .
+                $uniqueId .
+                '.png';
+
+
+            $destination =
+                $imgDir .
+                '/' .
+                $fileName;
+
+
+            @imagepng(
+                $crop,
+                $destination,
+                6
+            );
+
+
+            imagedestroy(
+                $crop
+            );
+
+
+            if (
+                !isBlankOrSolidImage(
+                    $destination
+                )
+            ) {
+
+                $result['user'] =
+                    $fileName;
+
+            } else {
+
+                @unlink(
+                    $destination
+                );
+            }
+        }
+    }
+
+
+    // ========================================================
+    // SIGNATURE CROP
+    // ========================================================
+
+    if (
+        !$result['signature']
+    ) {
+
+        $signRect = [
+
+            'x' =>
+                (int)($w * 0.50),
+
+            'y' =>
+                (int)($h * 0.25),
+
+            'width' =>
+                (int)($w * 0.45),
+
+            'height' =>
+                (int)($h * 0.07)
+        ];
+
+
+        $crop =
+            @imagecrop(
+                $img,
+                $signRect
+            );
+
+
+        if (
+            $crop !== false
+        ) {
+
+            $fileName =
+                'sign_' .
+                $uniqueId .
+                '.png';
+
+
+            $destination =
+                $imgDir .
+                '/' .
+                $fileName;
+
+
+            @imagepng(
+                $crop,
+                $destination,
+                6
+            );
+
+
+            imagedestroy(
+                $crop
+            );
+
+
+            if (
+                trimSignatureImage(
+                    $destination,
+                    $destination
+                ) &&
+                !isBlankOrSolidImage(
+                    $destination
+                )
+            ) {
+
+                $result['signature'] =
+                    $fileName;
+
+            } else {
+
+                @unlink(
+                    $destination
+                );
+            }
+        }
+    }
+
+
+    imagedestroy(
+        $img
+    );
+
+
+    @unlink(
+        $rendered
+    );
+}
+
+
+// ============================================================
+// RENDER PDF PAGE 1
+// ============================================================
+
+function renderPdfPageOne(
+    $pdfPath,
+    $tempDir,
+    $uniqueId
+)
+{
+
+    $savePath =
+        $tempDir .
+        '/page_' .
+        $uniqueId .
+        '.png';
+
+
+    $prefix =
+        $tempDir .
+        '/page_' .
+        $uniqueId;
+
+
+    // ========================================================
+    // PDFTOPPM
+    // ========================================================
+
+    if (
+        commandExists('pdftoppm')
+    ) {
+
+        $command =
+            'pdftoppm ' .
+            '-f 1 ' .
+            '-singlefile ' .
+            '-png ' .
+            '-r 150 ' .
+            escapeshellarg($pdfPath) .
+            ' ' .
+            escapeshellarg($prefix) .
+            ' 2>/dev/null';
+
+
+        @exec($command);
+
+
+        if (
+            file_exists($savePath)
+        ) {
+
+            return $savePath;
+        }
+    }
+
+
+    // ========================================================
+    // IMAGICK
+    // ========================================================
+
+    if (
+        extension_loaded('imagick')
+    ) {
+
+        try {
+
+            $im =
+                new Imagick();
+
+
+            $im->setResolution(
+                150,
+                150
+            );
+
+
+            $im->readImage(
+                $pdfPath .
+                '[0]'
+            );
+
+
+            $im->setImageFormat(
+                'png'
+            );
+
+
+            $im->writeImage(
+                $savePath
+            );
+
+
+            $im->clear();
+
+            $im->destroy();
+
+
+            if (
+                file_exists($savePath)
+            ) {
+
+                return $savePath;
+            }
+
+        } catch (Throwable $e) {
+
+            // Ignore
+        }
+    }
+
+
+    return null;
+}
+
+
+// ============================================================
 // NORMALIZE SIGNATURE
 // ============================================================
 
 function normalizeSignatureImage(
     $sourcePath,
     $destinationPath
-) {
+)
+{
+
+    if (
+        !function_exists(
+            'imagecreatefromstring'
+        )
+    ) {
+
+        return false;
+    }
+
 
     if (
         !file_exists($sourcePath)
     ) {
+
         return false;
     }
 
@@ -1353,7 +1768,10 @@ function normalizeSignatureImage(
         );
 
 
-    if ($data === false) {
+    if (
+        $data === false
+    ) {
+
         return false;
     }
 
@@ -1365,6 +1783,7 @@ function normalizeSignatureImage(
 
 
     if (!$src) {
+
         return false;
     }
 
@@ -1387,10 +1806,6 @@ function normalizeSignatureImage(
         return false;
     }
 
-
-    // --------------------------------------------------------
-    // REMOVE OUTER BORDER
-    // --------------------------------------------------------
 
     $borderX =
         max(
@@ -1435,82 +1850,6 @@ function normalizeSignatureImage(
     }
 
 
-    // --------------------------------------------------------
-    // BACKGROUND DETECTION
-    // --------------------------------------------------------
-
-    $points = [
-
-        [0, 0],
-
-        [$w - 1, 0],
-
-        [0, $h - 1],
-
-        [$w - 1, $h - 1],
-
-        [(int)($w / 2), 0],
-
-        [(int)($w / 2), $h - 1]
-    ];
-
-
-    $samples = [];
-
-
-    foreach (
-        $points as $point
-    ) {
-
-        $rgb =
-            imagecolorat(
-                $src,
-                $point[0],
-                $point[1]
-            );
-
-
-        $r =
-            ($rgb >> 16) & 255;
-
-
-        $g =
-            ($rgb >> 8) & 255;
-
-
-        $b =
-            $rgb & 255;
-
-
-        $gray =
-            (int)(
-                0.299 * $r +
-                0.587 * $g +
-                0.114 * $b
-            );
-
-
-        $samples[] =
-            $gray;
-    }
-
-
-    $background =
-        array_sum($samples) /
-        max(
-            1,
-            count($samples)
-        );
-
-
-    $invert =
-        $background < 110;
-
-
-    // --------------------------------------------------------
-    // CREATE CLEAN SIGNATURE
-    // --------------------------------------------------------
-
     $canvas =
         imagecreatetruecolor(
             $innerW,
@@ -1543,6 +1882,79 @@ function normalizeSignatureImage(
         $white
     );
 
+
+    // ========================================================
+    // BACKGROUND
+    // ========================================================
+
+    $points = [
+
+        [0, 0],
+
+        [$w - 1, 0],
+
+        [0, $h - 1],
+
+        [$w - 1, $h - 1],
+
+        [(int)($w / 2), 0],
+
+        [(int)($w / 2), $h - 1]
+    ];
+
+
+    $samples = [];
+
+
+    foreach (
+        $points as $p
+    ) {
+
+        $rgb =
+            imagecolorat(
+                $src,
+                $p[0],
+                $p[1]
+            );
+
+
+        $r =
+            ($rgb >> 16) & 255;
+
+
+        $g =
+            ($rgb >> 8) & 255;
+
+
+        $b =
+            $rgb & 255;
+
+
+        $gray =
+            (int)(
+                0.299 * $r +
+                0.587 * $g +
+                0.114 * $b
+            );
+
+
+        $samples[] =
+            $gray;
+    }
+
+
+    $background =
+        array_sum($samples) /
+        count($samples);
+
+
+    $invert =
+        $background < 110;
+
+
+    // ========================================================
+    // PIXEL PROCESS
+    // ========================================================
 
     for (
         $y = 0;
@@ -1616,7 +2028,9 @@ function normalizeSignatureImage(
     }
 
 
-    imagedestroy($src);
+    imagedestroy(
+        $src
+    );
 
 
     @imagepng(
@@ -1626,7 +2040,9 @@ function normalizeSignatureImage(
     );
 
 
-    imagedestroy($canvas);
+    imagedestroy(
+        $canvas
+    );
 
 
     return trimSignatureImage(
@@ -1643,11 +2059,23 @@ function normalizeSignatureImage(
 function trimSignatureImage(
     $sourcePath,
     $destinationPath
-) {
+)
+{
+
+    if (
+        !function_exists(
+            'imagecreatefrompng'
+        )
+    ) {
+
+        return false;
+    }
+
 
     if (
         !file_exists($sourcePath)
     ) {
+
         return false;
     }
 
@@ -1659,6 +2087,7 @@ function trimSignatureImage(
 
 
     if (!$img) {
+
         return false;
     }
 
@@ -1906,9 +2335,14 @@ function trimSignatureImage(
     );
 
 
-    imagedestroy($cropped);
+    imagedestroy(
+        $cropped
+    );
 
-    imagedestroy($img);
+
+    imagedestroy(
+        $img
+    );
 
 
     return true;
@@ -1916,129 +2350,30 @@ function trimSignatureImage(
 
 
 // ============================================================
-// RENDER FIRST PDF PAGE
-// ============================================================
-
-function renderPdfPageOne(
-    $pdfPath,
-    $tempDir,
-    $uniqueId
-) {
-
-    $savePath =
-        $tempDir .
-        '/page_' .
-        $uniqueId .
-        '.png';
-
-
-    $withoutExtension =
-        $tempDir .
-        '/page_' .
-        $uniqueId;
-
-
-    // --------------------------------------------------------
-    // PDFTOPPM
-    // --------------------------------------------------------
-
-    if (
-        function_exists('exec')
-    ) {
-
-        $command =
-            'pdftoppm ' .
-            '-f 1 ' .
-            '-singlefile ' .
-            '-png ' .
-            '-r 150 ' .
-            escapeshellarg($pdfPath) .
-            ' ' .
-            escapeshellarg($withoutExtension);
-
-
-        @exec($command);
-
-
-        if (
-            file_exists($savePath)
-        ) {
-
-            return $savePath;
-        }
-    }
-
-
-    // --------------------------------------------------------
-    // IMAGICK
-    // --------------------------------------------------------
-
-    if (
-        extension_loaded('imagick')
-    ) {
-
-        try {
-
-            $im =
-                new Imagick();
-
-
-            $im->setResolution(
-                150,
-                150
-            );
-
-
-            $im->readImage(
-                $pdfPath .
-                '[0]'
-            );
-
-
-            $im->setImageFormat(
-                'png'
-            );
-
-
-            $im->writeImage(
-                $savePath
-            );
-
-
-            $im->clear();
-
-            $im->destroy();
-
-
-            if (
-                file_exists($savePath)
-            ) {
-
-                return $savePath;
-            }
-
-        } catch (Throwable $e) {
-
-            // Continue
-        }
-    }
-
-
-    return null;
-}
-
-
-// ============================================================
-// CHECK BLANK / SOLID IMAGE
+// BLANK IMAGE CHECK
 // ============================================================
 
 function isBlankOrSolidImage(
     $filePath
-) {
+)
+{
+
+    if (
+        !function_exists(
+            'imagecreatefromstring'
+        )
+    ) {
+
+        // Cannot inspect without GD.
+        // Do not reject the image.
+        return false;
+    }
+
 
     if (
         !file_exists($filePath)
     ) {
+
         return true;
     }
 
@@ -2049,7 +2384,10 @@ function isBlankOrSolidImage(
         );
 
 
-    if ($data === false) {
+    if (
+        $data === false
+    ) {
+
         return true;
     }
 
@@ -2061,6 +2399,7 @@ function isBlankOrSolidImage(
 
 
     if (!$img) {
+
         return true;
     }
 
@@ -2100,10 +2439,6 @@ function isBlankOrSolidImage(
         ) / 3;
 
 
-    $hasDifference =
-        false;
-
-
     $stepX =
         max(
             1,
@@ -2116,6 +2451,10 @@ function isBlankOrSolidImage(
             1,
             (int)($h / 12)
         );
+
+
+    $hasDiff =
+        false;
 
 
     for (
@@ -2153,7 +2492,7 @@ function isBlankOrSolidImage(
                 ) > 25
             ) {
 
-                $hasDifference =
+                $hasDiff =
                     true;
 
                 break 2;
@@ -2162,21 +2501,24 @@ function isBlankOrSolidImage(
     }
 
 
-    imagedestroy($img);
+    imagedestroy(
+        $img
+    );
 
 
-    return !$hasDifference;
+    return !$hasDiff;
 }
 
 
 // ============================================================
-// CREATE PLACEHOLDER
+// PLACEHOLDER
 // ============================================================
 
 function createPlaceholderImage(
     $type,
     $imgDir
-) {
+)
+{
 
     $fileName =
         'placeholder_' .
@@ -2191,86 +2533,104 @@ function createPlaceholderImage(
 
 
     if (
-        !file_exists($filePath)
+        file_exists($filePath)
     ) {
 
-        if (
-            function_exists(
-                'imagecreatetruecolor'
-            )
-        ) {
-
-            $im =
-                imagecreatetruecolor(
-                    150,
-                    150
-                );
-
-
-            $bg =
-                imagecolorallocate(
-                    $im,
-                    240,
-                    240,
-                    240
-                );
-
-
-            $textColor =
-                imagecolorallocate(
-                    $im,
-                    120,
-                    120,
-                    120
-                );
-
-
-            imagefill(
-                $im,
-                0,
-                0,
-                $bg
-            );
-
-
-            $text =
-                $type === 'user'
-                    ? 'User Photo'
-                    : 'Signature';
-
-
-            imagestring(
-                $im,
-                3,
-                30,
-                65,
-                $text,
-                $textColor
-            );
-
-
-            @imagepng(
-                $im,
-                $filePath
-            );
-
-
-            imagedestroy($im);
-        }
+        return $fileName;
     }
 
 
-    return $fileName;
+    // ========================================================
+    // GD AVAILABLE
+    // ========================================================
+
+    if (
+        function_exists(
+            'imagecreatetruecolor'
+        )
+    ) {
+
+        $im =
+            imagecreatetruecolor(
+                150,
+                150
+            );
+
+
+        $bg =
+            imagecolorallocate(
+                $im,
+                240,
+                240,
+                240
+            );
+
+
+        $textColor =
+            imagecolorallocate(
+                $im,
+                120,
+                120,
+                120
+            );
+
+
+        imagefill(
+            $im,
+            0,
+            0,
+            $bg
+        );
+
+
+        $text =
+            $type === 'user'
+                ? 'User Photo'
+                : 'Signature';
+
+
+        imagestring(
+            $im,
+            3,
+            30,
+            65,
+            $text,
+            $textColor
+        );
+
+
+        @imagepng(
+            $im,
+            $filePath
+        );
+
+
+        imagedestroy(
+            $im
+        );
+
+
+        return $fileName;
+    }
+
+
+    // ========================================================
+    // GD MISSING
+    // ========================================================
+
+    // Return empty string instead of causing API crash.
+    return '';
 }
 
 
 // ============================================================
-// EXTRACT NAME BANGLA
+// NAME BANGLA
 // ============================================================
 
 function extractNameBangla(
     $text
-) {
+)
+{
 
     $value =
         extractBetween(
@@ -2280,7 +2640,9 @@ function extractNameBangla(
         );
 
 
-    if (!$value) {
+    if (
+        !$value
+    ) {
 
         $value =
             extractBetween(
@@ -2291,19 +2653,36 @@ function extractNameBangla(
     }
 
 
-    return cleanBanglaName(
+    $value =
+        preg_replace(
+            '/halnagad_\d+/iu',
+            '',
+            $value
+        );
+
+
+    $value =
+        preg_replace(
+            '/Tag/iu',
+            '',
+            $value
+        );
+
+
+    return cleanText(
         $value
     );
 }
 
 
 // ============================================================
-// EXTRACT NAME ENGLISH
+// NAME ENGLISH
 // ============================================================
 
 function extractNameEnglish(
     $text
-) {
+)
+{
 
     $value =
         extractBetween(
@@ -2313,7 +2692,9 @@ function extractNameEnglish(
         );
 
 
-    if (!$value) {
+    if (
+        !$value
+    ) {
 
         $value =
             extractBetween(
@@ -2325,44 +2706,276 @@ function extractNameEnglish(
 
 
     return strtoupper(
-        cleanText($value)
+        cleanText(
+            $value
+        )
     );
 }
 
 
 // ============================================================
-// CLEAN BANGLA NAME
+// EXTRACT NID
 // ============================================================
 
-function cleanBanglaName(
+function extractNid(
     $text
-) {
+)
+{
 
-    $text =
-        preg_replace(
-            '/halnagad_\d+/iu',
-            '',
+    if (
+        preg_match(
+            '/National\s*ID[^\d০-৯]*([0-9০-৯]{10,17})/iu',
+            $text,
+            $m
+        )
+    ) {
+
+        return normalizeDigits(
+            $m[1]
+        );
+    }
+
+
+    $value =
+        findValueByLabel(
+            'National ID',
             $text
         );
 
 
-    $text =
-        preg_replace(
-            '/Tag/iu',
-            '',
+    if (
+        preg_match(
+            '/[0-9০-৯]{10,17}/u',
+            $value,
+            $m
+        )
+    ) {
+
+        return normalizeDigits(
+            $m[0]
+        );
+    }
+
+
+    return '';
+}
+
+
+// ============================================================
+// EXTRACT PIN
+// ============================================================
+
+function extractPin(
+    $text
+)
+{
+
+    if (
+        preg_match(
+            '/Pin[^\d০-৯]*([0-9০-৯]{10,17})/iu',
+            $text,
+            $m
+        )
+    ) {
+
+        return normalizeDigits(
+            $m[1]
+        );
+    }
+
+
+    $value =
+        findValueByLabel(
+            'Pin',
             $text
         );
 
 
-    $text =
-        preg_replace(
-            '/Name\s*\(\s*Bangla\s*\)/iu',
-            '',
+    if (
+        preg_match(
+            '/[0-9০-৯]{10,17}/u',
+            $value,
+            $m
+        )
+    ) {
+
+        return normalizeDigits(
+            $m[0]
+        );
+    }
+
+
+    return '';
+}
+
+
+// ============================================================
+// NORMALIZE DIGITS
+// ============================================================
+
+function normalizeDigits(
+    $value
+)
+{
+
+    return str_replace(
+        [
+            '০',
+            '১',
+            '২',
+            '৩',
+            '৪',
+            '৫',
+            '৬',
+            '৭',
+            '৮',
+            '৯'
+        ],
+        [
+            '0',
+            '1',
+            '2',
+            '3',
+            '4',
+            '5',
+            '6',
+            '7',
+            '8',
+            '9'
+        ],
+        trim($value)
+    );
+}
+
+
+// ============================================================
+// BLOOD GROUP
+// ============================================================
+
+function extractBloodGroup(
+    $text
+)
+{
+
+    $value =
+        findValueByLabel(
+            'Blood Group',
             $text
         );
 
 
-    return cleanText($text);
+    if (
+        preg_match(
+            '/\b(AB|A|B|O)\s*([+-])\b/iu',
+            $value,
+            $m
+        )
+    ) {
+
+        return strtoupper(
+            $m[1] .
+            $m[2]
+        );
+    }
+
+
+    if (
+        preg_match(
+            '/\b(AB|A|B|O)\s*([+-])\b/iu',
+            $text,
+            $m
+        )
+    ) {
+
+        return strtoupper(
+            $m[1] .
+            $m[2]
+        );
+    }
+
+
+    return '';
+}
+
+
+// ============================================================
+// FIND LABEL VALUE
+// ============================================================
+
+function findValueByLabel(
+    $label,
+    $text
+)
+{
+
+    $pattern =
+        '/' .
+        preg_quote(
+            $label,
+            '/'
+        ) .
+        '[\s\|:]+' .
+        '([^\r\n\|]+)/iu';
+
+
+    if (
+        preg_match(
+            $pattern,
+            $text,
+            $matches
+        )
+    ) {
+
+        return cleanText(
+            $matches[1]
+        );
+    }
+
+
+    return '';
+}
+
+
+// ============================================================
+// EXTRACT BETWEEN
+// ============================================================
+
+function extractBetween(
+    $text,
+    $start,
+    $end
+)
+{
+
+    $pattern =
+        '/' .
+        preg_quote(
+            $start,
+            '/'
+        ) .
+        '(.*?)' .
+        preg_quote(
+            $end,
+            '/'
+        ) .
+        '/isu';
+
+
+    if (
+        preg_match(
+            $pattern,
+            $text,
+            $matches
+        )
+    ) {
+
+        return trim(
+            $matches[1]
+        );
+    }
+
+
+    return '';
 }
 
 
@@ -2372,7 +2985,8 @@ function cleanBanglaName(
 
 function cleanText(
     $text
-) {
+)
+{
 
     if (
         !$text
@@ -2409,268 +3023,31 @@ function cleanText(
 
 
 // ============================================================
-// EXTRACT BETWEEN
-// ============================================================
-
-function extractBetween(
-    $text,
-    $start,
-    $end
-) {
-
-    $pattern =
-        '/' .
-        preg_quote(
-            $start,
-            '/'
-        ) .
-        '(.*?)' .
-        preg_quote(
-            $end,
-            '/'
-        ) .
-        '/isu';
-
-
-    if (
-        preg_match(
-            $pattern,
-            $text,
-            $matches
-        )
-    ) {
-
-        return trim(
-            $matches[1]
-        );
-    }
-
-
-    return '';
-}
-
-
-// ============================================================
-// FIND VALUE BY LABEL
-// ============================================================
-
-function findValueByLabel(
-    $label,
-    $text
-) {
-
-    $pattern =
-        '/' .
-        preg_quote(
-            $label,
-            '/'
-        ) .
-        '[\s\|:]+' .
-        '([^\r\n\|]+)/iu';
-
-
-    if (
-        preg_match(
-            $pattern,
-            $text,
-            $matches
-        )
-    ) {
-
-        return cleanText(
-            $matches[1]
-        );
-    }
-
-
-    return '';
-}
-
-
-// ============================================================
-// EXTRACT NID
-// ============================================================
-
-function extractNid(
-    $text
-) {
-
-    if (
-        preg_match(
-            '/National\s*ID[^\d০-৯]*([0-9০-৯]{10,17})/iu',
-            $text,
-            $m
-        )
-    ) {
-
-        return normalizeDigits(
-            $m[1]
-        );
-    }
-
-
-    $value =
-        findValueByLabel(
-            'National ID',
-            $text
-        );
-
-
-    return normalizeDigits(
-        $value
-    );
-}
-
-
-// ============================================================
-// EXTRACT PIN
-// ============================================================
-
-function extractPin(
-    $text
-) {
-
-    if (
-        preg_match(
-            '/Pin[^\d০-৯]*([0-9০-৯]{10,17})/iu',
-            $text,
-            $m
-        )
-    ) {
-
-        return normalizeDigits(
-            $m[1]
-        );
-    }
-
-
-    $value =
-        findValueByLabel(
-            'Pin',
-            $text
-        );
-
-
-    return normalizeDigits(
-        $value
-    );
-}
-
-
-// ============================================================
-// NORMALIZE DIGITS
-// ============================================================
-
-function normalizeDigits(
-    $value
-) {
-
-    $bn =
-        [
-            '০',
-            '১',
-            '২',
-            '৩',
-            '৪',
-            '৫',
-            '৬',
-            '৭',
-            '৮',
-            '৯'
-        ];
-
-
-    $en =
-        [
-            '0',
-            '1',
-            '2',
-            '3',
-            '4',
-            '5',
-            '6',
-            '7',
-            '8',
-            '9'
-        ];
-
-
-    return str_replace(
-        $bn,
-        $en,
-        trim($value)
-    );
-}
-
-
-// ============================================================
-// EXTRACT BLOOD GROUP
-// ============================================================
-
-function extractBloodGroup(
-    $text
-) {
-
-    $value =
-        findValueByLabel(
-            'Blood Group',
-            $text
-        );
-
-
-    if (
-        preg_match(
-            '/\b(A|B|AB|O)\s*([+-])\b/iu',
-            $value,
-            $m
-        )
-    ) {
-
-        return strtoupper(
-            $m[1] .
-            $m[2]
-        );
-    }
-
-
-    if (
-        preg_match(
-            '/\b(A|B|AB|O)\s*([+-])\b/iu',
-            $text,
-            $m
-        )
-    ) {
-
-        return strtoupper(
-            $m[1] .
-            $m[2]
-        );
-    }
-
-
-    return '';
-}
-
-
-// ============================================================
-// FORMAT DATE OF BIRTH
+// DATE OF BIRTH
 // ============================================================
 
 function formatDateOfBirth(
     $raw
-) {
+)
+{
 
     $raw =
-        cleanText($raw);
+        cleanText(
+            $raw
+        );
 
 
-    if (!$raw) {
+    if (
+        !$raw
+    ) {
         return '';
     }
 
 
     $timestamp =
-        strtotime($raw);
+        strtotime(
+            $raw
+        );
 
 
     if (
@@ -2684,7 +3061,6 @@ function formatDateOfBirth(
     }
 
 
-    // fallback: dd-mm-yyyy
     if (
         preg_match(
             '/(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})/',
@@ -2720,12 +3096,13 @@ function formatDateOfBirth(
 
 
 // ============================================================
-// EXTRACT POSTAL CODE
+// POSTAL CODE
 // ============================================================
 
 function extractPostalCode(
     $text
-) {
+)
+{
 
     if (
         preg_match(
@@ -2760,14 +3137,15 @@ function extractPostalCode(
 
 
 // ============================================================
-// CONVERT TO BANGLA DIGITS
+// BANGLA DIGITS
 // ============================================================
 
 function convertToBangla(
     $number
-) {
+)
+{
 
-    $en =
+    return str_replace(
         [
             '0',
             '1',
@@ -2779,10 +3157,7 @@ function convertToBangla(
             '7',
             '8',
             '9'
-        ];
-
-
-    $bn =
+        ],
         [
             '০',
             '১',
@@ -2794,32 +3169,28 @@ function convertToBangla(
             '৭',
             '৮',
             '৯'
-        ];
-
-
-    return str_replace(
-        $en,
-        $bn,
+        ],
         $number
     );
 }
 
 
 // ============================================================
-// COMBINE ADDRESS
+// ADDRESS
 // ============================================================
 
 function combineAddress(
     $fullText
-) {
-
-    // --------------------------------------------------------
-    // PRESENT ADDRESS BLOCK
-    // --------------------------------------------------------
+)
+{
 
     $text =
         $fullText;
 
+
+    // ========================================================
+    // PRESENT ADDRESS
+    // ========================================================
 
     if (
         preg_match(
@@ -2834,9 +3205,9 @@ function combineAddress(
     }
 
 
-    // --------------------------------------------------------
+    // ========================================================
     // VILLAGE
-    // --------------------------------------------------------
+    // ========================================================
 
     $villageRaw =
         extractBetween(
@@ -2846,7 +3217,9 @@ function combineAddress(
         );
 
 
-    if (!$villageRaw) {
+    if (
+        !$villageRaw
+    ) {
 
         $villageRaw =
             extractBetween(
@@ -2857,7 +3230,9 @@ function combineAddress(
     }
 
 
-    if (!$villageRaw) {
+    if (
+        !$villageRaw
+    ) {
 
         $villageRaw =
             extractBetween(
@@ -2868,7 +3243,9 @@ function combineAddress(
     }
 
 
-    if (!$villageRaw) {
+    if (
+        !$villageRaw
+    ) {
 
         $villageRaw =
             extractBetween(
@@ -2901,9 +3278,9 @@ function combineAddress(
         );
 
 
-    // --------------------------------------------------------
-    // HOME / HOLDING
-    // --------------------------------------------------------
+    // ========================================================
+    // HOME
+    // ========================================================
 
     $homeRaw =
         extractBetween(
@@ -2913,7 +3290,9 @@ function combineAddress(
         );
 
 
-    if (!$homeRaw) {
+    if (
+        !$homeRaw
+    ) {
 
         $homeRaw =
             extractBetween(
@@ -2945,9 +3324,9 @@ function combineAddress(
         );
 
 
-    // --------------------------------------------------------
+    // ========================================================
     // POST OFFICE
-    // --------------------------------------------------------
+    // ========================================================
 
     $postOffice =
         cleanText(
@@ -2959,7 +3338,9 @@ function combineAddress(
         );
 
 
-    if (!$postOffice) {
+    if (
+        !$postOffice
+    ) {
 
         $postOffice =
             cleanText(
@@ -2972,9 +3353,9 @@ function combineAddress(
     }
 
 
-    // --------------------------------------------------------
+    // ========================================================
     // POSTAL CODE
-    // --------------------------------------------------------
+    // ========================================================
 
     $postalCode =
         extractPostalCode(
@@ -2982,7 +3363,9 @@ function combineAddress(
         );
 
 
-    if (!$postalCode) {
+    if (
+        !$postalCode
+    ) {
 
         $postalCode =
             extractPostalCode(
@@ -2997,9 +3380,9 @@ function combineAddress(
         );
 
 
-    // --------------------------------------------------------
+    // ========================================================
     // UPOZILA
-    // --------------------------------------------------------
+    // ========================================================
 
     $upozila =
         cleanText(
@@ -3011,7 +3394,9 @@ function combineAddress(
         );
 
 
-    if (!$upozila) {
+    if (
+        !$upozila
+    ) {
 
         $upozila =
             cleanText(
@@ -3024,7 +3409,9 @@ function combineAddress(
     }
 
 
-    if (!$upozila) {
+    if (
+        !$upozila
+    ) {
 
         $upozila =
             cleanText(
@@ -3037,9 +3424,9 @@ function combineAddress(
     }
 
 
-    // --------------------------------------------------------
+    // ========================================================
     // DISTRICT
-    // --------------------------------------------------------
+    // ========================================================
 
     $district =
         cleanText(
@@ -3051,7 +3438,9 @@ function combineAddress(
         );
 
 
-    if (!$district) {
+    if (
+        !$district
+    ) {
 
         $district =
             cleanText(
@@ -3064,9 +3453,9 @@ function combineAddress(
     }
 
 
-    // --------------------------------------------------------
-    // FINAL ADDRESS
-    // --------------------------------------------------------
+    // ========================================================
+    // FINAL
+    // ========================================================
 
     $parts = [];
 
@@ -3111,7 +3500,9 @@ function combineAddress(
 
 
         $postOffice =
-            trim($postOffice);
+            trim(
+                $postOffice
+            );
 
 
         $postPart =
@@ -3161,12 +3552,106 @@ function combineAddress(
 
 
 // ============================================================
-// REMOVE TEMP DIRECTORY
+// UPLOAD ERROR MESSAGE
+// ============================================================
+
+function uploadErrorMessage(
+    $error
+)
+{
+
+    switch ($error) {
+
+        case UPLOAD_ERR_INI_SIZE:
+            return 'Uploaded file exceeds server upload_max_filesize.';
+
+        case UPLOAD_ERR_FORM_SIZE:
+            return 'Uploaded file exceeds form MAX_FILE_SIZE.';
+
+        case UPLOAD_ERR_PARTIAL:
+            return 'The uploaded file was only partially uploaded.';
+
+        case UPLOAD_ERR_NO_FILE:
+            return 'No file was uploaded.';
+
+        case UPLOAD_ERR_NO_TMP_DIR:
+            return 'Missing temporary folder on server.';
+
+        case UPLOAD_ERR_CANT_WRITE:
+            return 'Failed to write uploaded file to disk.';
+
+        case UPLOAD_ERR_EXTENSION:
+            return 'A PHP extension stopped the file upload.';
+
+        default:
+            return 'Unknown upload error.';
+    }
+}
+
+
+// ============================================================
+// UPLOAD URL
+// ============================================================
+
+function getUploadsUrl()
+{
+
+    $https =
+        isset($_SERVER['HTTPS']) &&
+        (
+            $_SERVER['HTTPS'] === 'on' ||
+            $_SERVER['HTTPS'] == 1
+        );
+
+
+    $protocol =
+        $https
+            ? 'https'
+            : 'http';
+
+
+    $host =
+        $_SERVER['HTTP_HOST'] ??
+        'localhost';
+
+
+    $script =
+        $_SERVER['SCRIPT_NAME'] ??
+        '';
+
+
+    $directory =
+        str_replace(
+            '\\',
+            '/',
+            dirname($script)
+        );
+
+
+    $directory =
+        rtrim(
+            $directory,
+            '/'
+        );
+
+
+    return
+        $protocol .
+        '://' .
+        $host .
+        $directory .
+        '/uploads/';
+}
+
+
+// ============================================================
+// REMOVE DIRECTORY
 // ============================================================
 
 function removeDirectory(
     $directory
-) {
+)
+{
 
     if (
         !is_dir($directory)
@@ -3182,7 +3667,11 @@ function removeDirectory(
 
 
     if (!$items) {
-        @rmdir($directory);
+
+        @rmdir(
+            $directory
+        );
+
         return;
     }
 
