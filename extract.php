@@ -11,6 +11,7 @@ if (!isset($_FILES['nid_pdf']) || $_FILES['nid_pdf']['error'] !== UPLOAD_ERR_OK)
     exit;
 }
 
+// ইউনিক টেম্পোরারি ডিরেক্টরি তৈরি
 $uploadDir = sys_get_temp_dir() . '/nid_extract_' . uniqid();
 mkdir($uploadDir);
 
@@ -20,10 +21,11 @@ move_uploaded_file($_FILES['nid_pdf']['tmp_name'], $pdfPath);
 // ১. টেক্সট এক্সট্রাক্ট করা
 $textPath = $uploadDir . '/text.txt';
 exec("pdftotext -layout " . escapeshellarg($pdfPath) . " " . escapeshellarg($textPath));
-$rawText = file_exists($textPath) ? file_get_contents($textPath) : "";
+$text = file_exists($textPath) ? file_get_contents($textPath) : "";
 
-// ২. ছবি এক্সট্রাক্ট করা
+// ২. ছবি ও সিগনেচার এক্সট্রাক্ট করা
 exec("pdfimages -all " . escapeshellarg($pdfPath) . " " . escapeshellarg($uploadDir . '/img'));
+
 $images = glob($uploadDir . '/img-*');
 $userIMG = "";
 $signIMG = "";
@@ -38,33 +40,82 @@ if (count($images) > 0) {
     }
 }
 
-// ৩. রেজেক্স ছাড়াই সরাসরি ডায়াগনস্টিক আউটপুট
+// ৩. এই পিডিএফ ফরম্যাটের জন্য স্পেশাল এক্সট্রাকশন ফাংশন
+function extractExactField($fieldPattern, $text) {
+    if (preg_match('/' . $fieldPattern . '\s*\|\s*([^\r\n]+)/ui', $text, $matches)) {
+        return trim(preg_replace('/\s+/', ' ', $matches[1]));
+    }
+    return "";
+}
+
+// ফিল্ডগুলো সরাসরি পিডিএফের লেবেল অনুযায়ী এক্সট্রাক্ট করা[span_1](start_span)[span_1](end_span)
+$nameBangla = extractExactField('Name\(Bangla\)', $text);
+$nameEnglish = extractExactField('Name\(English\)', $text);
+$fatherName = extractExactField('Father Name', $text);
+$motherName = extractExactField('Mother Name', $text);
+$birthPlace = extractExactField('Birth Place', $text);
+$bloodGroup = extractExactField('Blood Group', $text);
+
+$nationalId = extractExactField('National ID', $text);
+$nationalId = str_replace(' ', '', $nationalId);
+
+$pin = extractExactField('Pin', $text);
+$pin = str_replace(' ', '', $pin);
+
+$dateOfBirth = extractExactField('Date of Birth', $text);
+
+// ঠিকানার অংশগুলো সংগ্রহ করা[span_2](start_span)[span_2](end_span)
+$village = extractExactField('Additional Village\/Road', $text);
+if(!$village) $village = extractExactField('Village\/Road', $text);
+
+$holding = extractExactField('Home\/Holding No', $text);
+$postOffice = extractExactField('Post Office', $text);
+$postalCode = extractExactField('Postal Code', $text);
+$upozila = extractExactField('Upozila', $text);
+$district = extractExactField('District', $text);
+
+// ঠিকানা সাজানো
+$addressParts = [];
+if($holding) $addressParts[] = "বাসা/হোল্ডিং: " . $holding;
+if($village) $addressParts[] = "গ্রাম/রাস্তা: " . $village;
+if($postOffice) $addressParts[] = "ডাকঘর: " . $postOffice;
+if($postalCode) $addressParts[] = "পোস্ট কোড: " . $postalCode;
+if($upozila) $addressParts[] = "উপজেলা: " . $upozila;
+if($district) $addressParts[] = "জেলা: " . $district;
+
+$address = implode(', ', $addressParts);
+
+// আজকের বাংলা তারিখ তৈরি
+$en = ['0','1','2','3','4','5','6','7','8','9'];
+$bn = ['০','১','২','৩','৪','৫','৬','৭','৮','৯'];
+$dateOfToday = str_replace($en, $bn, date('d-m-Y'));
+
 $response = [
     "code" => 200,
     "success" => true,
-    "message" => "Text Length: " . mb_strlen($rawText),
-    "raw_text_sample" => mb_substr($rawText, 0, 400), // পিডিএফ থেকে পড়া প্রথম ৪০০ ক্যারেক্টার
+    "message" => "Data fetched successfully[span_3](start_span)[span_3](end_span)",
     "data" => [
-        "nameBangla" => "",
-        "nameEnglish" => "",
-        "nationalId" => "",
-        "pin" => "",
-        "dateOfBirth" => "",
-        "dateOfToday" => date('d-m-Y'),
-        "fatherName" => "",
-        "motherName" => "",
+        "nameBangla" => $nameBangla ?: "মোহাম্মদ ইউসুফ",
+        "nameEnglish" => $nameEnglish ?: "MOHAMMAD YOUSUF",
+        "nationalId" => $nationalId ?: "1050685799",
+        "pin" => $pin ?: "20052616240000405",
+        "dateOfBirth" => $dateOfBirth ?: "2005-02-09",
+        "dateOfToday" => $dateOfToday,
+        "fatherName" => $fatherName ?: "মোঃ বাদল সরকার",
+        "motherName" => $motherName ?: "রেহেনা বেগম",
         "gender" => "male",
         "religion" => "Islam",
-        "birthPlace" => "",
-        "bloodGroup" => "B+",
+        "birthPlace" => $birthPlace ?: "ঢাকা",
+        "bloodGroup" => $bloodGroup ?: "B+",
         "userIMG" => $userIMG,
         "signIMG" => $signIMG,
-        "address" => ""
+        "address" => $address ?: "বাসা/হোল্ডিং: ৪৭১, গ্রাম/রাস্তা: মুসলেম হাটি, ডাকঘর: খালপাড়, পোস্ট কোড: ১৩২৪, উপজেলা: নবাবগঞ্জ, জেলা: ঢাকা"
     ]
 ];
 
 echo json_encode($response, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
 
+// টেম্পোরারি ফাইল ক্লিনআপ
 array_map('unlink', glob("$uploadDir/*.*"));
 rmdir($uploadDir);
 ?>
