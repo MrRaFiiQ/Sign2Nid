@@ -9,7 +9,6 @@ module.exports = async function handler(req, res) {
 
   try {
     const { files } = await new Promise((resolve, reject) => {
-      // formidable v2/v3 কম্প্যাটিবিলিটি ফিক্স
       const parseForm = typeof formidable === 'function' ? formidable : formidable.formidable;
       const form = parseForm({ multiples: false, keepExtensions: true });
       
@@ -28,11 +27,14 @@ module.exports = async function handler(req, res) {
 
     const dataBuffer = fs.readFileSync(rawFile.filepath);
     
-    // ১. PDF টেক্সট পার্স করা
+    // ১. PDF টেক্সট পার্স ও ক্লিন করা
     const pdfData = await pdfParse(dataBuffer);
-    const text = pdfData.text || '';
+    let text = pdfData.text || '';
+    
+    // অদরকারি কন্ট্রোল ক্যারেক্টার ও অনাকাঙ্ক্ষিত সিম্বল রিমুভ
+    text = text.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, ' ');
 
-    // ২. PDF থেকে JPEG ইমেজ স্ট্রিম এক্সট্রাক্ট করা
+    // ২. PDF থেকে JPEG ইমেজ স্ট্রিম এক্সট্রাক্ট করা (স্বাক্ষরের জন্য থ্রেশহোল্ড ৩০০ বাইটে নামানো হয়েছে)
     const extractJpegs = (buffer) => {
       const jpegs = [];
       let start = 0;
@@ -41,7 +43,7 @@ module.exports = async function handler(req, res) {
         if (end !== -1) {
           end += 2;
           const imgBuf = buffer.slice(start, end);
-          if (imgBuf.length > 2000) {
+          if (imgBuf.length > 300) { // ৩০০ বাইটের ওপর ইমেজ ফিল্টার করবে
             jpegs.push('data:image/jpeg;base64,' + imgBuf.toString('base64'));
           }
           start = end;
@@ -56,17 +58,22 @@ module.exports = async function handler(req, res) {
     const userIMG = extractedImages[0] || "";
     const signIMG = extractedImages[1] || "";
 
-    // ৩. ডাটা ফিল্টারিং (Regex)
-    const nameBanglaMatch = text.match(/নাম\s*[:ঃ]?\s*(.*)/);
-    const nameEnglishMatch = text.match(/Name\s*[:ঃ]?\s*(.*)/i);
-    const nidMatch = text.match(/National ID\s*[:ঃ]?\s*([0-9\s]+)/i);
-    const pinMatch = text.match(/Pin\s*[:ঃ]?\s*([0-9\s]+)/i);
-    const dobMatch = text.match(/Date of Birth\s*[:ঃ]?\s*([0-9]{2}\s+[A-Za-z]{3}\s+[0-9]{4})/i);
-    const fatherMatch = text.match(/পিতা\s*[:ঃ]?\s*(.*)/);
-    const motherMatch = text.match(/মাতা\s*[:ঃ]?\s*(.*)/);
-    const birthPlaceMatch = text.match(/জন্ম\s*স্থান\s*[:ঃ]?\s*(.*)/);
-    const bloodMatch = text.match(/Blood Group\s*[:ঃ]?\s*([A-Z][+-])/i);
-    const addressMatch = text.match(/ঠিকানা\s*[:ঃ]?\s*(.*)/);
+    // ৩. উন্নত Regex প্যাটার্ন দিয়ে ডাটা ফিল্টারিং
+    const getMatch = (pattern) => {
+      const match = text.match(pattern);
+      return match && match[1] ? match[1].trim().replace(/\s+/g, ' ') : "";
+    };
+
+    const nameBangla = getMatch(/(?:নাম\s*\(বাংলা\)|\bনাম)\s*[:ঃ]?\s*([^\n\r\t:]+)/i);
+    const nameEnglish = getMatch(/(?:Name\s*\(English\)|\bName)\s*[:ঃ]?\s*([A-Za-z\s.]+)/i);
+    const nationalId = getMatch(/(?:National ID|NID|জাতীয় পরিচয়পত্র নম্বর)\s*[:ঃ]?\s*([0-9\s]+)/i).replace(/\s+/g, '');
+    const pin = getMatch(/(?:Pin|পিন)\s*[:ঃ]?\s*([0-9\s]+)/i).replace(/\s+/g, '');
+    const dateOfBirth = getMatch(/(?:Date of Birth|জন্ম তারিখ)\s*[:ঃ]?\s*([0-9]{2}[\/\s\-]+[A-Za-z0-9]+[\/\s\-]+[0-9]{4})/i);
+    const fatherName = getMatch(/(?:পিতা|Father Name)\s*[:ঃ]?\s*([^\n\r\t:]+)/i);
+    const motherName = getMatch(/(?:মাতা|Mother Name)\s*[:ঃ]?\s*([^\n\r\t:]+)/i);
+    const birthPlace = getMatch(/(?:জন্ম\s*স্থান|Place of Birth)\s*[:ঃ]?\s*([^\n\r\t:]+)/i);
+    const bloodGroup = getMatch(/(?:Blood Group|রক্তের গ্রুপ)\s*[:ঃ]?\s*([A-Z][+-])/i);
+    const address = getMatch(/(?:ঠিকানা|Address)\s*[:ঃ]?\s*([^\n\r\t:]+)/i);
 
     const getBanglaDate = () => {
       const en = ['0','1','2','3','4','5','6','7','8','9'];
@@ -80,21 +87,21 @@ module.exports = async function handler(req, res) {
       success: true,
       message: "Data fetched successfully",
       data: {
-        nameBangla: nameBanglaMatch ? nameBanglaMatch[1].trim() : "",
-        nameEnglish: nameEnglishMatch ? nameEnglishMatch[1].trim() : "",
-        nationalId: nidMatch ? nidMatch[1].replace(/\s+/g, '').trim() : "",
-        pin: pinMatch ? pinMatch[1].replace(/\s+/g, '').trim() : "",
-        dateOfBirth: dobMatch ? dobMatch[1].trim() : "",
+        nameBangla: nameBangla,
+        nameEnglish: nameEnglish,
+        nationalId: nationalId,
+        pin: pin,
+        dateOfBirth: dateOfBirth,
         dateOfToday: getBanglaDate(),
-        fatherName: fatherMatch ? fatherMatch[1].trim() : "",
-        motherName: motherMatch ? motherMatch[1].trim() : "",
+        fatherName: fatherName,
+        motherName: motherName,
         gender: "male",
         religion: "Islam",
-        birthPlace: birthPlaceMatch ? birthPlaceMatch[1].trim() : "",
-        bloodGroup: bloodMatch ? bloodMatch[1].trim() : "B+",
+        birthPlace: birthPlace,
+        bloodGroup: bloodGroup || "B+",
         userIMG: userIMG,
         signIMG: signIMG,
-        address: addressMatch ? addressMatch[1].trim() : ""
+        address: address
       }
     });
 
