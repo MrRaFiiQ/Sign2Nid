@@ -77,8 +77,8 @@ document.getElementById('uploadForm').addEventListener('submit', async function(
 
         const data = await response.json();
         
-        if (!response.ok) {
-            throw new Error(data.message || 'ডাটা এক্সট্রাক্ট করতে সমস্যা হয়েছে!');
+        if (!response.ok || !data.success) {
+            throw new Error(data.error || data.message || 'ডাটা এক্সট্রাক্ট করতে সমস্যা হয়েছে!');
         }
 
         document.getElementById('resultSection').classList.remove('hidden');
