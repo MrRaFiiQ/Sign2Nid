@@ -32,10 +32,10 @@ module.exports = async function handler(req, res) {
     const pdfData = await pdfParse(dataBuffer);
     let text = pdfData.text || '';
     
-    // অদরকারি কন্ট্রোল ক্যারেক্টার ও অনাকাঙ্ক্ষিত সিম্বল রিমুভ
+    // অদরকারি কন্ট্রোল ক্যারেক্টার রিমুভ, কিন্তু নিউলাইন ঠিক রাখা
     text = text.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, ' ');
 
-    // ২. PDF থেকে JPEG ইমেজ স্ট্রিম এক্সট্রাক্ট করে PNG-তে কনভার্ট করা
+    // ২. ইমেজ এক্সট্রাক্টর (থ্রেশহোল্ড কমিয়ে ৫০ বাইট করা হয়েছে ছোট সিগনেচার ধরার জন্য)
     const extractImagesAsPng = async (buffer) => {
       const pngImages = [];
       let start = 0;
@@ -44,14 +44,12 @@ module.exports = async function handler(req, res) {
         if (end !== -1) {
           end += 2;
           const imgBuf = buffer.slice(start, end);
-          if (imgBuf.length > 300) { // ফিল্টার (ছোট আইকন বাদ দেওয়ার জন্য)
+          if (imgBuf.length > 50) { // একদম ছোট ছবিও স্কিপ করবে না
             try {
-              // Jimp ব্যবহার করে Jpeg বাফারকে PNG Base64-এ কনভার্ট করা
               const img = await Jimp.read(imgBuf);
               const pngBuffer = await img.getBufferAsync(Jimp.MIME_PNG);
               pngImages.push('data:image/png;base64,' + pngBuffer.toString('base64'));
             } catch (err) {
-              // কনভার্ট ফেইল হলে ডিফল্ট Jpeg রাখা হবে
               pngImages.push('data:image/jpeg;base64,' + imgBuf.toString('base64'));
             }
           }
@@ -65,25 +63,21 @@ module.exports = async function handler(req, res) {
 
     const extractedImages = await extractImagesAsPng(dataBuffer);
     const userIMG = extractedImages[0] || "";
+    // দ্বিতীয় ইমেজটি সিগনেচার হিসেবে ধরার চেষ্টা
     const signIMG = extractedImages[1] || "";
 
-    // ৩. উন্নত Regex প্যাটার্ন (Lookahead ব্যবহার করে যাতে এক ফিল্ডের ডাটা অন্য ফিল্ডে না যায়)
-    const getMatch = (pattern) => {
-      const match = text.match(pattern);
-      return match && match[1] ? match[1].trim().replace(/\s+/g, ' ') : "";
+    // ৩. হার্ডকোর Regex ফিল্টারিং (খুবই ব্রড প্যাটার্ন)
+    const extractLine = (keywordStr) => {
+        const regex = new RegExp(`(?:${keywordStr})\\s*[:ঃ]?\\s*([^\\n\\r]+)`, 'i');
+        const match = text.match(regex);
+        return match ? match[1].trim() : "";
     };
 
-    // নির্দিষ্ট কি-ওয়ার্ডের আগে থেমে যাওয়ার জন্য Lookahead (?=\s*(?:...)) ব্যবহার করা হয়েছে
-    const nameBangla = getMatch(/(?:নাম\s*\(বাংলা\)|\bনাম)\s*[:ঃ]?\s*(.*?)(?=\s*(?:Name|পিতা|মাতা|Date of Birth|National ID|Pin|$))/i);
-    const nameEnglish = getMatch(/(?:Name\s*\(English\)|\bName)\s*[:ঃ]?\s*([A-Za-z\s.\-]+?)(?=\s*(?:Date of Birth|National ID|Pin|Blood Group|পিতা|মাতা|$))/i);
-    const nationalId = getMatch(/(?:National ID|NID|জাতীয় পরিচয়পত্র নম্বর)\s*[:ঃ]?\s*([0-9\s]{9,17})/i).replace(/\s+/g, '');
-    const pin = getMatch(/(?:Pin|পিন)\s*[:ঃ]?\s*([0-9\s]{10,17})/i).replace(/\s+/g, '');
-    const dateOfBirth = getMatch(/(?:Date of Birth|জন্ম তারিখ)\s*[:ঃ]?\s*([0-9]{2}[\/\s\-]+[A-Za-z0-9]+[\/\s\-]+[0-9]{4})/i);
-    const fatherName = getMatch(/(?:পিতা|Father Name)\s*[:ঃ]?\s*(.*?)(?=\s*(?:মাতা|Mother Name|Date of Birth|National ID|Pin|$))/i);
-    const motherName = getMatch(/(?:মাতা|Mother Name)\s*[:ঃ]?\s*(.*?)(?=\s*(?:ঠিকানা|Address|Date of Birth|National ID|Pin|$))/i);
-    const birthPlace = getMatch(/(?:জন্ম\s*স্থান|Place of Birth)\s*[:ঃ]?\s*(.*?)(?=\s*(?:ঠিকানা|Address|Blood Group|Date of Birth|$))/i);
-    const bloodGroup = getMatch(/(?:Blood Group|রক্তের গ্রুপ)\s*[:ঃ]?\s*([A-Z]{1,2}[+-])/i);
-    const address = getMatch(/(?:ঠিকানা|Address)\s*[:ঃ]?\s*(.*?)(?=\s*(?:Blood Group|Date of Birth|National ID|$))/i);
+    // নির্দিষ্ট ফিল্ডের জন্য স্পেশাল Regex
+    const nidMatch = text.match(/(?:National ID|NID|জাতীয় পরিচয়পত্র নম্বর)[\s:ঃ]*([0-9\s]{9,17})/i);
+    const pinMatch = text.match(/(?:Pin|পিন)[\s:ঃ]*([0-9\s]{10,17})/i);
+    const dobMatch = text.match(/(?:Date of Birth|জন্ম তারিখ|DOB)[\s:ঃ]*([0-9]{2}[\s\/\-][A-Za-z0-9]+[\s\/\-][0-9]{4})/i);
+    const bloodMatch = text.match(/(?:Blood Group|রক্তের গ্রুপ)[\s:ঃ]*([A-Z]{1,2}[+-])/i);
 
     const getBanglaDate = () => {
       const en = ['0','1','2','3','4','5','6','7','8','9'];
@@ -97,21 +91,21 @@ module.exports = async function handler(req, res) {
       success: true,
       message: "Data fetched successfully",
       data: {
-        nameBangla: nameBangla,
-        nameEnglish: nameEnglish,
-        nationalId: nationalId,
-        pin: pin,
-        dateOfBirth: dateOfBirth,
+        nameBangla: extractLine('নাম\\s*\\(বাংলা\\)|\\bনাম'),
+        nameEnglish: extractLine('Name\\s*\\(English\\)|\\bName').replace(/Date of Birth.*/i, '').trim(),
+        nationalId: nidMatch ? nidMatch[1].replace(/\s+/g, '') : "",
+        pin: pinMatch ? pinMatch[1].replace(/\s+/g, '') : "",
+        dateOfBirth: dobMatch ? dobMatch[1].trim() : extractLine('Date of Birth|জন্ম তারিখ'),
         dateOfToday: getBanglaDate(),
-        fatherName: fatherName,
-        motherName: motherName,
+        fatherName: extractLine('পিতা|Father Name'),
+        motherName: extractLine('মাতা|Mother Name'),
         gender: "male",
         religion: "Islam",
-        birthPlace: birthPlace,
-        bloodGroup: bloodGroup || "B+",
+        birthPlace: extractLine('জন্ম\\s*স্থান|Place of Birth'),
+        bloodGroup: bloodMatch ? bloodMatch[1].trim() : "B+",
         userIMG: userIMG,
         signIMG: signIMG,
-        address: address
+        address: extractLine('ঠিকানা|Address')
       }
     });
 
