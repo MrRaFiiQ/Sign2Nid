@@ -32,7 +32,7 @@ $uploadDir = sys_get_temp_dir() . '/nid_extract_' . uniqid();
 $pdfPath = $uploadDir . '/uploaded.pdf';
 @move_uploaded_file($_FILES[$fileKey]['tmp_name'], $pdfPath);
 
-// ১. টেক্সট এক্সট্রাক্ট করা (UTF-8 এনকোডিং নিশ্চিত করতে -s ব্যবহার করা যেতে পারে)
+// ১. টেক্সট এক্সট্রাক্ট করা
 $textPath = $uploadDir . '/text.txt';
 @exec("pdftotext -layout " . escapeshellarg($pdfPath) . " " . escapeshellarg($textPath));
 $text = file_exists($textPath) ? file_get_contents($textPath) : "";
@@ -73,10 +73,16 @@ if (count($images) > 0) {
 // HELPER FUNCTIONS
 // ============================================================
 
+function cleanBanglaText($text) {
+    // বাংলা অক্ষরের মাঝের অপ্রয়োজনীয় স্পেস দূর করা
+    $text = preg_replace('/(?<=[\x{0980}-\x{09FF}])\s+(?=[\x{0980}-\x{09FF}])/u', '', $text);
+    return trim($text);
+}
+
 function extractBetween($text, $start, $end) {
     $pattern = '/' . preg_quote($start, '/') . '[\s\|:]+(.*?)(?=' . preg_quote($end, '/') . '|$)/uis';
     if (preg_match($pattern, $text, $matches)) {
-        return trim($matches[1]);
+        return cleanBanglaText(trim($matches[1]));
     }
     return '';
 }
@@ -92,7 +98,7 @@ function cleanText($text) {
         'License Documents', 'Union Porishod', 'Permanent Address', 
         'Education', 'Region', 'Division', 'City Corporation', 'Ward For'
     ], '', $text);
-    return trim($text);
+    return cleanBanglaText($text);
 }
 
 function cleanName($text) {
@@ -119,7 +125,7 @@ function cleanName($text) {
         }
     }
     $text = preg_replace('/[\|]+/u', ' ', $text);
-    return trim(preg_replace('/\s+/', ' ', $text));
+    return cleanBanglaText(preg_replace('/\s+/', ' ', $text));
 }
 
 function extractPostalCode($text) {
@@ -226,19 +232,20 @@ function combineAddress($fullText) {
         $parts[] = $district;
     }
 
-    return implode(', ', $parts);
+    return cleanBanglaText(implode(', ', $parts));
 }
 
 // ৩. ডাটা এক্সট্রাকশন
 $nameBangla = findValueByLabel('Name(Bangla)', $text);
 if(!$nameBangla) $nameBangla = findValueByLabel('Name (Bangla)', $text);
+$nameBangla = cleanBanglaText($nameBangla);
 
 $nameEnglish = findValueByLabel('Name(English)', $text);
 if(!$nameEnglish) $nameEnglish = findValueByLabel('Name (English)', $text);
 
-$fatherName = findValueByLabel('Father Name', $text);
-$motherName = findValueByLabel('Mother Name', $text);
-$birthPlace = findValueByLabel('Birth Place', $text);
+$fatherName = cleanBanglaText(findValueByLabel('Father Name', $text));
+$motherName = cleanBanglaText(findValueByLabel('Mother Name', $text));
+$birthPlace = cleanBanglaText(findValueByLabel('Birth Place', $text));
 
 $bloodGroupRaw = findValueByLabel('Blood Group', $text);
 if (preg_match('/^(A|B|AB|O)[+-]$/ui', trim($bloodGroupRaw), $match)) {
@@ -277,8 +284,8 @@ $response = [
         "dateOfToday" => $dateOfToday,
         "fatherName" => $fatherName,
         "motherName" => $motherName,
-        "gender" => $gender ?: "male",
-        "religion" => $religion ?: "Islam",
+        "gender" => $gender,
+        "religion" => $religion,
         "birthPlace" => $birthPlace,
         "bloodGroup" => $bloodGroup,
         "userIMG" => $userIMG,
