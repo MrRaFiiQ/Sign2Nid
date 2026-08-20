@@ -23,6 +23,9 @@ $textPath = $uploadDir . '/text.txt';
 exec("pdftotext " . escapeshellarg($pdfPath) . " " . escapeshellarg($textPath));
 $text = file_exists($textPath) ? file_get_contents($textPath) : "";
 
+// সমস্ত নতুন লাইন এবং অতিরিক্ত স্পেসকে একটি সিঙ্গেল স্পেসে রূপান্তর করে টেক্সট ফ্লাট করা (মূল সমাধান)
+$flatText = preg_replace('/\s+/', ' ', $text);
+
 // ২. ছবি ও সিগনেচার এক্সট্রাক্ট করা
 exec("pdfimages -all " . escapeshellarg($pdfPath) . " " . escapeshellarg($uploadDir . '/img'));
 
@@ -40,43 +43,43 @@ if (count($images) > 0) {
     }
 }
 
-// ৩. অ্যাডভান্সড ডাইনামিক ফিল্ড এক্সট্রাকশন ফাংশন (মাল্টি-লাইন এবং পাইপ হ্যান্ডেল করতে সক্ষম)
-function extractPdfField($label, $text) {
+// ৩. ফ্লাট টেক্সট থেকে সঠিক ডাটা তোলার জন্য নিখুঁত ফাংশন
+function extractFlatField($label, $text) {
     $escapedLabel = preg_quote($label, '/');
-    // লেবেলের পর স্পেস, নতুন লাইন বা পাইপ পেরিয়ে সঠিক ডাটা ক্যাপচার করবে
-    $pattern = '/' . $escapedLabel . '[\s\|:\r\n]+(?:\|\s*)*([^\r\n\|]+)/ui';
+    // লেবেল এবং পাইপের মাঝখানের যেকোনো দূরত্ব অতিক্রম করে পরের মানটুকু নিখুঁতভাবে ক্যাপচার করবে
+    $pattern = '/' . $escapedLabel . '\s*\|\s*([^\|]+)/ui';
     if (preg_match($pattern, $text, $matches)) {
-        return trim(preg_replace('/\s+/', ' ', $matches[1]));
+        return trim($matches[1]);
     }
     return "";
 }
 
-// ডাইনামিক ফিল্ড রিডিং
-$nameBangla = extractPdfField('Name\(Bangla\)', $text);
-$nameEnglish = extractPdfField('Name\(English\)', $text);
-$fatherName = extractPdfField('Father Name', $text);
-$motherName = extractPdfField('Mother Name', $text);
-$birthPlace = extractPdfField('Birth Place', $text);
-$bloodGroup = extractPdfField('Blood Group', $text);
-$gender = extractPdfField('Gender', $text);
-$religion = extractPdfField('Religion', $text);
+// ডাইনামিক ফিল্ড এক্সট্রাকশন
+$nameBangla = extractFlatField('Name\(Bangla\)', $flatText);
+$nameEnglish = extractFlatField('Name\(English\)', $flatText);
+$fatherName = extractFlatField('Father Name', $flatText);
+$motherName = extractFlatField('Mother Name', $flatText);
+$birthPlace = extractFlatField('Birth Place', $flatText);
+$bloodGroup = extractFlatField('Blood Group', $flatText);
+$gender = extractFlatField('Gender', $flatText);
+$religion = extractFlatField('Religion', $flatText);
 
-$nationalId = extractPdfField('National ID', $text);
+$nationalId = extractFlatField('National ID', $flatText);
 $nationalId = str_replace(' ', '', $nationalId);
 
-$pin = extractPdfField('Pin', $text);
+$pin = extractFlatField('Pin', $flatText);
 $pin = str_replace(' ', '', $pin);
 
-$dateOfBirth = extractPdfField('Date of Birth', $text);
+$dateOfBirth = extractFlatField('Date of Birth', $flatText);
 
-// ঠিকানার অংশগুলো নিখুঁতভাবে সংগ্রহ করা
-$holding = extractPdfField('Home\/Holding No', $text);
-$village = extractPdfField('Additional Village\/Road', $text);
-if(!$village) $village = extractPdfField('Village\/Road', $text);
-$postOffice = extractPdfField('Post Office', $text);
-$postalCode = extractPdfField('Postal Code', $text);
-$upozila = extractPdfField('Upozila', $text);
-$district = extractPdfField('District', $text);
+// ঠিকানার অংশগুলো সঠিকভাবে সংগ্রহ করা
+$holding = extractFlatField('Home\/Holding No', $flatText);
+$village = extractFlatField('Additional Village\/Road', $flatText);
+if(!$village) $village = extractFlatField('Village\/Road', $flatText);
+$postOffice = extractFlatField('Post Office', $flatText);
+$postalCode = extractFlatField('Postal Code', $flatText);
+$upozila = extractFlatField('Upozila', $flatText);
+$district = extractFlatField('District', $flatText);
 
 $addressParts = [];
 if($holding) $addressParts[] = "বাসা/হোল্ডিং: " . $holding;
