@@ -77,6 +77,10 @@ document.getElementById('uploadForm').addEventListener('submit', async function(
 
         const data = await response.json();
         
+        if (!response.ok) {
+            throw new Error(data.message || 'ডাটা এক্সট্রাক্ট করতে সমস্যা হয়েছে!');
+        }
+
         document.getElementById('resultSection').classList.remove('hidden');
         document.getElementById('jsonDisplay').innerText = JSON.stringify(data, null, 2);
 
@@ -93,7 +97,7 @@ document.getElementById('uploadForm').addEventListener('submit', async function(
             document.getElementById('signPlaceholder').classList.remove('hidden');
         }
     } catch (err) {
-        alert("ডাটা এক্সট্রাক্ট করতে সমস্যা হয়েছে!");
+        alert("এরর: " + err.message);
     } finally {
         btn.innerText = "ডাটা এক্সট্রাক্ট করুন";
         btn.disabled = false;
